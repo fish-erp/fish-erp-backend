@@ -16,6 +16,7 @@ describe('validateEnvironment', () => {
     expect(validateEnvironment(validEnvironment)).toMatchObject({
       NODE_ENV: 'test',
       PORT: 3000,
+      APP_TIMEZONE: 'Asia/Ho_Chi_Minh',
       SWAGGER_ENABLED: false,
     });
   });

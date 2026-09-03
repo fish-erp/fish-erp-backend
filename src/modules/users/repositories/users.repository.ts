@@ -36,7 +36,6 @@ export interface UpdateUserData {
   passwordHash?: string;
   displayName?: string;
   fullName?: string;
-  role?: UserRole;
   status?: UserStatus;
   updatedBy?: string;
 }

@@ -23,7 +23,7 @@ export class UsersService {
       passwordHash: await argon2.hash(input.password),
       ...(input.displayName === undefined ? {} : { displayName: input.displayName.trim() }),
       ...(input.fullName === undefined ? {} : { fullName: input.fullName.trim() }),
-      role: input.role ?? UserRole.USER,
+      role: UserRole.ADMIN,
       status: input.status ?? UserStatus.ACTIVE,
       createdBy: actorId,
       updatedBy: actorId,
@@ -73,7 +73,6 @@ export class UsersService {
       ...(input.password === undefined ? {} : { passwordHash: await argon2.hash(input.password) }),
       ...(input.displayName === undefined ? {} : { displayName: input.displayName.trim() }),
       ...(input.fullName === undefined ? {} : { fullName: input.fullName.trim() }),
-      ...(input.role === undefined ? {} : { role: input.role }),
       ...(input.status === undefined ? {} : { status: input.status }),
       updatedBy: actorId,
     });

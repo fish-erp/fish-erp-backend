@@ -96,7 +96,7 @@ describe('UsersService', () => {
 
     expect(response).toMatchObject({
       email: 'user@example.com',
-      role: UserRole.USER,
+      role: UserRole.ADMIN,
       status: UserStatus.ACTIVE,
     });
     expect(response).not.toHaveProperty('passwordHash');

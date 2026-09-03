@@ -8,7 +8,7 @@ import {
   MaxLength,
   MinLength,
 } from 'class-validator';
-import { UserRole, UserStatus } from '../../../common/domain/enums.js';
+import { UserStatus } from '../../../common/domain/enums.js';
 
 export class UpdateUserDto {
   @ApiPropertyOptional({ example: 'new-email@example.com' })
@@ -41,11 +41,6 @@ export class UpdateUserDto {
   @IsString()
   @MaxLength(50)
   fullName?: string;
-
-  @ApiPropertyOptional({ enum: UserRole })
-  @IsOptional()
-  @IsEnum(UserRole)
-  role?: UserRole;
 
   @ApiPropertyOptional({ enum: UserStatus })
   @IsOptional()

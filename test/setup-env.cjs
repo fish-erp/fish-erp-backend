@@ -1,5 +1,6 @@
 process.env.NODE_ENV = 'test';
 process.env.PORT = '3000';
+process.env.APP_TIMEZONE = 'Asia/Ho_Chi_Minh';
 process.env.DATABASE_URL =
   process.env.DATABASE_URL ??
   'postgresql://fish_erp:fish_erp@localhost:5433/fish_erp?schema=fish_erp';

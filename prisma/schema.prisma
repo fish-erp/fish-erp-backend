@@ -1,3 +1,5 @@
+// ==== START OF PRISMA CONFIG ====
+
 generator client {
   provider     = "prisma-client"
   output       = "../src/generated/prisma"
@@ -9,19 +11,21 @@ datasource db {
   schemas  = ["fish_erp"]
 }
 
+// ==== END OF PRISMA CONFIG ====
+
+// ==== START OF USER ====
+
 enum UserRole {
-  USER
-  ADMIN
-  SUPER_ADMIN
+  ADMIN // Hệ thống nhỏ chỉ có tài khoản quản trị
 
   @@map("user_role")
   @@schema("fish_erp")
 }
 
 enum UserStatus {
-  ACTIVE
-  DISABLED
-  DELETED
+  ACTIVE // Đang hoạt động
+  DISABLED // Tạm khóa
+  DELETED // Đã xóa mềm
 
   @@map("user_status")
   @@schema("fish_erp")
@@ -34,7 +38,7 @@ model User {
   passwordHash String     @map("password_hash")
   displayName  String?    @map("display_name") @db.VarChar(120)
   fullName     String?    @map("full_name") @db.VarChar(50)
-  role         UserRole   @default(USER)
+  role         UserRole   @default(ADMIN)
   status       UserStatus @default(ACTIVE)
 
   deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
@@ -71,3 +75,193 @@ model AuthSession {
   @@map("auth_sessions")
   @@schema("fish_erp")
 }
+
+// ==== END OF USER ====
+
+// ==== START OF PRODUCT ====
+
+enum ProductType {
+  MEDICINE // Thuốc cho cá
+  FEED // Thức ăn cho cá
+  OTHER // Sản phẩm khác
+  UNKNOWN // Chưa xác định
+
+  @@map("product_type")
+  @@schema("fish_erp")
+}
+
+enum ProductStatus {
+  SELLING // Đang bán
+  PAUSED // Tạm ngưng bán
+  DISCONTINUED // Ngừng kinh doanh
+
+  @@map("product_status")
+  @@schema("fish_erp")
+}
+
+model Product {
+  id String @id @default(uuid()) @db.Uuid
+
+  productCode String @unique @map("product_code") @db.VarChar(50) // Mã sản phẩm nội bộ
+  productName String @map("product_name") @db.VarChar(255) // Tên sản phẩm
+
+  // Giá bán hiện tại, luôn áp dụng chung cho hàng nhập cũ và hàng nhập mới chưa bán
+  productPrice Decimal @map("product_price") @db.Decimal(18, 2)
+
+  // Tổng tồn kho hiện tại, chỉ thay đổi khi hoàn thành hoặc hủy phiếu nhập/xuất
+  remainingQuantity Int @default(0) @map("remaining_quantity") @db.Integer
+
+  productUnit String  @map("product_unit") @db.VarChar(20) // Đơn vị cơ sở: chai, gói, kg, lít...
+  productNote String? @map("product_note") @db.VarChar(1000) // Ghi chú sản phẩm
+
+  type   ProductType   @default(UNKNOWN)
+  status ProductStatus @default(SELLING)
+
+  importProducts ImportProduct[]
+  exportProducts ExportProduct[]
+
+  deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
+  deleteBy String?   @map("delete_by") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([type, status, productName])
+  @@index([createdAt])
+  @@map("product")
+  @@schema("fish_erp")
+}
+
+// ==== END OF PRODUCT ====
+
+// ==== START OF IMPORT ====
+
+enum ImportStatus {
+  DRAFT // Phiếu nháp, chưa cộng tồn kho
+  COMPLETED // Đã hoàn thành, được tính vào tồn kho
+  CANCELLED // Đã hủy
+
+  @@map("import_status")
+  @@schema("fish_erp")
+}
+
+model ImportProduct {
+  id String @id @default(uuid()) @db.Uuid
+
+  importCode  String  @unique @map("import_code") @db.VarChar(50) // Mã phiếu nhập, ví dụ IMP-202609-0001
+  importPrice Decimal @map("import_price") @db.Decimal(18, 2) // Giá nhập riêng của lô này
+
+  importQuantity Int @map("import_quantity") @db.Integer // Số lượng nhập, chỉ nhận số nguyên dương
+
+  expireDate DateTime? @map("expire_date") @db.Timestamptz(3) // Ngày hết hạn, không có thì để null
+  importNote String?   @map("import_note") @db.VarChar(1000) // Ghi chú lần nhập
+
+  status ImportStatus @default(DRAFT)
+
+  // Thời điểm nghiệp vụ để lọc báo cáo; DB lưu timestamptz, ứng dụng hiển thị theo Asia/Ho_Chi_Minh
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
+  cancelledAt DateTime? @map("cancelled_at") @db.Timestamptz(3)
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
+  deleteBy String?   @map("delete_by") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([productId, status, expireDate])
+  @@index([status, completedAt])
+  @@index([createdAt])
+  @@map("import_product")
+  @@schema("fish_erp")
+}
+
+// ==== END OF IMPORT ====
+
+// ==== START OF EXPORT ====
+
+enum ExportType {
+  AT_HOME // Xuất bán trực tiếp tại nhà
+  DELIVERY // Xuất bán giao hàng
+
+  @@map("export_type")
+  @@schema("fish_erp")
+}
+
+enum ExportStatus {
+  EDITING // Phiếu nháp, còn chỉnh sửa và chưa trừ tồn kho
+  COMPLETED // Đã hoàn thành và đã trừ tồn kho
+  CANCELLED // Đã hủy
+
+  @@map("export_status")
+  @@schema("fish_erp")
+}
+
+// Phần đầu hóa đơn, chứa thông tin chung và có thể có nhiều dòng sản phẩm
+model ExportInvoice {
+  id String @id @default(uuid()) @db.Uuid
+
+  invoiceCode String @unique @map("invoice_code") @db.VarChar(50) // Mã hóa đơn, ví dụ INV-202609-0001
+
+  exportType   ExportType   @default(AT_HOME) // Kiểu xuất hàng
+  exportStatus ExportStatus @default(EDITING) // Trạng thái chung của hóa đơn
+
+  customerName    String? @map("customer_name") @db.VarChar(120) // Tên khách hàng
+  customerPhone   String? @map("customer_phone") @db.VarChar(20) // Số điện thoại khách hàng
+  deliveryAddress String? @map("delivery_address") @db.VarChar(500) // Địa chỉ giao hàng
+  exportNote      String? @map("export_note") @db.VarChar(1000) // Ghi chú hóa đơn
+
+  // Thời điểm nghiệp vụ để lọc báo cáo; DB lưu timestamptz, ứng dụng hiển thị theo Asia/Ho_Chi_Minh
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
+  cancelledAt DateTime? @map("cancelled_at") @db.Timestamptz(3)
+
+  exportProducts ExportProduct[]
+
+  deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
+  deleteBy String?   @map("delete_by") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@index([exportStatus, completedAt])
+  @@index([createdAt])
+  @@map("export_invoice")
+  @@schema("fish_erp")
+}
+
+// Dòng hàng hóa trong hóa đơn xuất
+model ExportProduct {
+  id String @id @default(uuid()) @db.Uuid
+
+  exportQuantity Int @map("export_quantity") @db.Integer // Số lượng xuất, chỉ nhận số nguyên dương
+
+  // Chụp lại Product.productPrice khi hóa đơn hoàn thành; phiếu EDITING có thể để null
+  unitPrice Decimal? @map("unit_price") @db.Decimal(18, 2)
+  lineNote  String?  @map("line_note") @db.VarChar(500) // Ghi chú riêng cho dòng sản phẩm
+
+  exportInvoiceId String        @map("export_invoice_id") @db.Uuid
+  exportInvoice   ExportInvoice @relation(fields: [exportInvoiceId], references: [id], onDelete: Cascade)
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([exportInvoiceId, productId])
+  @@index([productId])
+  @@map("export_product")
+  @@schema("fish_erp")
+}
+
+// ==== END OF EXPORT ====

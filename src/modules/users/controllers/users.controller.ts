@@ -38,9 +38,9 @@ import { UsersService } from '../services/users.service.js';
 @ApiTags('users')
 @ApiBearerAuth('access-token')
 @ApiUnauthorizedResponse({ description: 'Missing or invalid access token' })
-@ApiForbiddenResponse({ description: 'ADMIN or SUPER_ADMIN role required' })
+@ApiForbiddenResponse({ description: 'ADMIN role required' })
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+@Roles(UserRole.ADMIN)
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
