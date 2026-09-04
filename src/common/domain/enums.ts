@@ -28,3 +28,12 @@ export const ProductStatus = {
 } as const;
 
 export type ProductStatus = (typeof ProductStatus)[keyof typeof ProductStatus];
+
+export const ImportStatus = {
+  DRAFT: 'DRAFT',
+  COMPLETED: 'COMPLETED',
+  CANCELLED: 'CANCELLED',
+} as const;
+
+export type ImportStatus = (typeof ImportStatus)[keyof typeof ImportStatus];
+
