@@ -37,3 +37,37 @@ export const ImportStatus = {
 
 export type ImportStatus = (typeof ImportStatus)[keyof typeof ImportStatus];
 
+export const ExportType = {
+  AT_HOME: 'AT_HOME',
+  DELIVERY: 'DELIVERY',
+} as const;
+
+export type ExportType = (typeof ExportType)[keyof typeof ExportType];
+
+export const ExportStatus = {
+  EDITING: 'EDITING',
+  COMPLETED: 'COMPLETED',
+  CANCELLED: 'CANCELLED',
+} as const;
+
+export type ExportStatus = (typeof ExportStatus)[keyof typeof ExportStatus];
+
+export const InventoryMovementType = {
+  OPENING_BALANCE: 'OPENING_BALANCE',
+  IMPORT_COMPLETED: 'IMPORT_COMPLETED',
+  IMPORT_CANCELLED: 'IMPORT_CANCELLED',
+  EXPORT_COMPLETED: 'EXPORT_COMPLETED',
+  EXPORT_CANCELLED: 'EXPORT_CANCELLED',
+} as const;
+
+export type InventoryMovementType =
+  (typeof InventoryMovementType)[keyof typeof InventoryMovementType];
+
+export const InventoryDocumentType = {
+  OPENING: 'OPENING',
+  IMPORT: 'IMPORT',
+  EXPORT: 'EXPORT',
+} as const;
+
+export type InventoryDocumentType =
+  (typeof InventoryDocumentType)[keyof typeof InventoryDocumentType];

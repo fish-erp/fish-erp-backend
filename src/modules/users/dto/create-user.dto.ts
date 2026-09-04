@@ -3,7 +3,6 @@ import {
   IsEmail,
   IsEnum,
   IsOptional,
-  IsPhoneNumber,
   IsString,
   MaxLength,
   MinLength,
@@ -17,7 +16,7 @@ export class CreateUserDto {
   email!: string;
 
   @ApiProperty({ example: '+84901234567' })
-  @IsPhoneNumber()
+  @IsString()
   @MaxLength(20)
   phoneNumber!: string;
 

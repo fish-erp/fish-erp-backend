@@ -4,143 +4,153 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { ImportStatus } from '../../../common/domain/enums.js';
-import { ProductsRepository } from '../../products/repositories/products.repository.js';
-import type { CreateImportDto } from '../dto/create-import.dto.js';
+import { Prisma, type Product } from '../../../generated/prisma/client.js';
+import {
+  ImportStatus,
+  InventoryDocumentType,
+  InventoryMovementType,
+} from '../../../common/domain/enums.js';
+import { DocumentSequenceService } from '../../../infrastructure/database/prisma/document-sequence.service.js';
+import { InventoryStockService } from '../../../infrastructure/database/prisma/inventory-stock.service.js';
+import { PrismaService } from '../../../infrastructure/database/prisma/prisma.service.js';
+import type { CreateImportDto, CreateImportItemDto } from '../dto/create-import.dto.js';
 import type {
+  ImportItemResponseDto,
   ImportListResponseDto,
   ImportResponseDto,
 } from '../dto/import-response.dto.js';
 import type { ListImportsQueryDto } from '../dto/list-imports-query.dto.js';
 import type { UpdateImportDto } from '../dto/update-import.dto.js';
-import type { ImportRecord } from '../repositories/imports.repository.js';
-import { ImportsRepository } from '../repositories/imports.repository.js';
+
+type ImportReceiptRecord = Prisma.ImportReceiptGetPayload<{
+  include: { importProducts: { include: { product: true } } };
+}>;
 
 @Injectable()
 export class ImportsService {
   constructor(
-    private readonly importsRepository: ImportsRepository,
-    private readonly productsRepository: ProductsRepository,
+    private readonly prisma: PrismaService,
+    private readonly sequenceService: DocumentSequenceService,
+    private readonly stockService: InventoryStockService,
   ) {}
 
   async create(input: CreateImportDto, actorId: string): Promise<ImportResponseDto> {
-    let importCode: string;
-    if (input.importCode?.trim()) {
-      importCode = input.importCode.trim();
-      const existing = await this.importsRepository.findByImportCode(importCode);
-      if (existing) {
+    this.ensureDistinctProducts(input.items);
+    const status = input.status ?? ImportStatus.COMPLETED;
+    if (status === ImportStatus.CANCELLED) {
+      throw new BadRequestException('Không thể tạo mới phiếu nhập ở trạng thái đã hủy');
+    }
+
+    const receiptId = await this.prisma.$transaction(async (tx) => {
+      const products = await this.findProducts(tx, input.items.map((item) => item.productId));
+      const now = new Date();
+      const importCode = input.importCode?.trim()
+        ? input.importCode.trim()
+        : await this.sequenceService.next(tx, 'IMP', now);
+      if (await tx.importReceipt.findUnique({ where: { importCode }, select: { id: true } })) {
         throw new ConflictException('Mã phiếu nhập đã tồn tại');
       }
-    } else {
-      importCode = await this.generateImportCode();
-    }
 
-    const status = input.status ?? ImportStatus.COMPLETED;
-    const completedAt = status === ImportStatus.COMPLETED ? new Date() : null;
+      const receipt = await tx.importReceipt.create({
+        data: {
+          importCode,
+          importNote: input.importNote?.trim() || null,
+          status,
+          completedAt: status === ImportStatus.COMPLETED ? now : null,
+          createdBy: actorId,
+          updatedBy: actorId,
+        },
+        select: { id: true },
+      });
+      const productMap = new Map(products.map((product) => [product.id, product]));
+      await tx.importProduct.createMany({
+        data: input.items.map((item) => {
+          const product = productMap.get(item.productId)!;
+          const completed = status === ImportStatus.COMPLETED;
+          return {
+            importReceiptId: receipt.id,
+            productId: item.productId,
+            importPrice: item.importPrice,
+            importQuantity: item.importQuantity,
+            expireDate: item.expireDate ? new Date(item.expireDate) : null,
+            lineNote: item.lineNote?.trim() || null,
+            productCodeSnapshot: completed ? product.productCode : null,
+            productNameSnapshot: completed ? product.productName : null,
+            productUnitSnapshot: completed ? product.productUnit : null,
+            createdBy: actorId,
+            updatedBy: actorId,
+          };
+        }),
+      });
 
-    // Trường hợp nhập danh sách nhiều sản phẩm trong 1 phiếu
-    if (input.items && input.items.length > 0) {
-      for (const item of input.items) {
-        const product = await this.productsRepository.findById(item.productId);
-        if (!product) {
-          throw new NotFoundException(`Sản phẩm với ID ${item.productId} không tồn tại`);
-        }
+      if (status === ImportStatus.COMPLETED) {
+        await this.stockService.apply(tx, {
+          adjustments: input.items.map((item) => ({
+            productId: item.productId,
+            quantityDelta: item.importQuantity,
+            unitPrice: item.importPrice,
+          })),
+          movementType: InventoryMovementType.IMPORT_COMPLETED,
+          documentType: InventoryDocumentType.IMPORT,
+          documentId: receipt.id,
+          documentCode: importCode,
+          occurredAt: now,
+          actorId,
+        });
       }
-
-      const createDataList = input.items.map((item) => ({
-        importCode,
-        productId: item.productId,
-        importPrice: item.importPrice,
-        importQuantity: item.importQuantity,
-        expireDate: item.expireDate ? new Date(item.expireDate) : null,
-        importNote: item.importNote?.trim() || input.importNote?.trim() || null,
-        status,
-        completedAt,
-        createdBy: actorId,
-        updatedBy: actorId,
-      }));
-
-      const createdRecords = await this.importsRepository.createManyWithStock(createDataList);
-      const first = createdRecords[0];
-      if (!first) {
-        throw new BadRequestException('Không thể tạo phiếu nhập');
-      }
-      const res = this.toResponse(first);
-      res.items = createdRecords.map((r) => this.toResponse(r));
-      res.totalPrice = createdRecords.reduce(
-        (sum, r) => sum + Number(r.importPrice) * r.importQuantity,
-        0,
-      );
-      res.importQuantity = createdRecords.reduce((sum, r) => sum + r.importQuantity, 0);
-      return res;
-    }
-
-    // Trường hợp nhập 1 sản phẩm đơn lẻ (fallback)
-    if (!input.productId || !input.importQuantity || input.importPrice === undefined) {
-      throw new BadRequestException('Vui lòng chọn sản phẩm và điền số lượng, đơn giá nhập');
-    }
-
-    const product = await this.productsRepository.findById(input.productId);
-    if (!product) {
-      throw new NotFoundException('Sản phẩm không tồn tại');
-    }
-
-    const record = await this.importsRepository.createWithStock({
-      importCode,
-      productId: input.productId,
-      importPrice: input.importPrice,
-      importQuantity: input.importQuantity,
-      ...(input.expireDate ? { expireDate: new Date(input.expireDate) } : { expireDate: null }),
-      ...(input.importNote?.trim() ? { importNote: input.importNote.trim() } : { importNote: null }),
-      status,
-      completedAt,
-      createdBy: actorId,
-      updatedBy: actorId,
+      return receipt.id;
     });
 
-    const singleRes = this.toResponse(record);
-    singleRes.items = [this.toResponse(record)];
-    return singleRes;
+    return this.findById(receiptId);
   }
 
   async findMany(query: ListImportsQueryDto): Promise<ImportListResponseDto> {
-    const fromDate = query.fromDate ? new Date(query.fromDate) : undefined;
-    const toDate = query.toDate ? new Date(query.toDate) : undefined;
-
-    const { items, total } = await this.importsRepository.findMany({
-      skip: (query.page - 1) * query.limit,
-      take: query.limit,
-      ...(query.search?.trim() ? { search: query.search.trim() } : {}),
+    const search = query.search?.trim();
+    const where: Prisma.ImportReceiptWhereInput = {
+      deleteAt: null,
       ...(query.status ? { status: query.status } : {}),
-      ...(query.productId ? { productId: query.productId } : {}),
-      fromDate,
-      toDate,
-    });
-
-    // Gom nhóm các dòng sản phẩm có chung importCode thành 1 phiếu nhập duy nhất
-    const groupedMap = new Map<string, ImportRecord[]>();
-    for (const item of items) {
-      const list = groupedMap.get(item.importCode) ?? [];
-      list.push(item);
-      groupedMap.set(item.importCode, list);
-    }
-
-    const voucherList: ImportResponseDto[] = [];
-    for (const [, groupItems] of groupedMap.entries()) {
-      const primary = groupItems[0];
-      if (!primary) continue;
-      const resp = this.toResponse(primary);
-      resp.items = groupItems.map((g) => this.toResponse(g));
-      resp.totalPrice = groupItems.reduce(
-        (sum, g) => sum + Number(g.importPrice) * g.importQuantity,
-        0,
-      );
-      resp.importQuantity = groupItems.reduce((sum, g) => sum + g.importQuantity, 0);
-      voucherList.push(resp);
-    }
+      ...(query.productId
+        ? { importProducts: { some: { productId: query.productId } } }
+        : {}),
+      ...(query.fromDate || query.toDate
+        ? {
+            createdAt: {
+              ...(query.fromDate ? { gte: new Date(query.fromDate) } : {}),
+              ...(query.toDate ? { lte: new Date(query.toDate) } : {}),
+            },
+          }
+        : {}),
+      ...(search
+        ? {
+            OR: [
+              { importCode: { contains: search, mode: 'insensitive' } },
+              {
+                importProducts: {
+                  some: {
+                    OR: [
+                      { product: { productName: { contains: search, mode: 'insensitive' } } },
+                      { product: { productCode: { contains: search, mode: 'insensitive' } } },
+                    ],
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+    const [items, total] = await Promise.all([
+      this.prisma.importReceipt.findMany({
+        where,
+        skip: (query.page - 1) * query.limit,
+        take: query.limit,
+        orderBy: { createdAt: 'desc' },
+        include: { importProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } } },
+      }),
+      this.prisma.importReceipt.count({ where }),
+    ]);
 
     return {
-      data: voucherList,
+      data: items.map((item) => this.toResponse(item)),
       meta: {
         page: query.page,
         limit: query.limit,
@@ -151,175 +161,209 @@ export class ImportsService {
   }
 
   async findById(id: string): Promise<ImportResponseDto> {
-    const record = await this.getImport(id);
-    const siblings = await this.importsRepository.findItemsByImportCode(record.importCode);
-    const res = this.toResponse(record);
-    res.items = siblings.map((s) => this.toResponse(s));
-    res.totalPrice = siblings.reduce(
-      (sum, s) => sum + Number(s.importPrice) * s.importQuantity,
-      0,
-    );
-    res.importQuantity = siblings.reduce((sum, s) => sum + s.importQuantity, 0);
-    return res;
+    const receipt = await this.prisma.importReceipt.findFirst({
+      where: { id, deleteAt: null },
+      include: { importProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } } },
+    });
+    if (!receipt) throw new NotFoundException('Phiếu nhập kho không tồn tại');
+    return this.toResponse(receipt);
   }
 
   async update(id: string, input: UpdateImportDto, actorId: string): Promise<ImportResponseDto> {
-    const current = await this.getImport(id);
-
-    if (current.status === ImportStatus.CANCELLED) {
-      throw new BadRequestException('Không thể chỉnh sửa phiếu nhập đã hủy');
+    const current = await this.getReceipt(id);
+    if (current.status !== ImportStatus.DRAFT) {
+      throw new BadRequestException('Chỉ phiếu nhập nháp mới được chỉnh sửa');
     }
+    if (input.items) this.ensureDistinctProducts(input.items);
 
-    if (current.status === ImportStatus.COMPLETED) {
-      if (input.productId && input.productId !== current.productId) {
-        throw new BadRequestException('Không thể thay đổi sản phẩm của phiếu nhập đã hoàn thành');
+    await this.prisma.$transaction(async (tx) => {
+      if (input.items) await this.findProducts(tx, input.items.map((item) => item.productId));
+      if (input.importCode?.trim() && input.importCode.trim() !== current.importCode) {
+        const duplicate = await tx.importReceipt.findUnique({
+          where: { importCode: input.importCode.trim() },
+          select: { id: true },
+        });
+        if (duplicate) throw new ConflictException('Mã phiếu nhập đã tồn tại');
       }
-      if (input.importQuantity && input.importQuantity !== current.importQuantity) {
-        throw new BadRequestException('Không thể thay đổi số lượng của phiếu nhập đã hoàn thành');
-      }
-      if (input.status === ImportStatus.CANCELLED) {
-        return this.cancel(id, actorId);
-      }
-
-      const updated = await this.importsRepository.update(id, {
-        ...(input.importNote !== undefined ? { importNote: input.importNote?.trim() ?? null } : {}),
-        updatedBy: actorId,
-      });
-      return this.findById(updated.id);
-    }
-
-    // current is DRAFT
-    if (input.status === ImportStatus.COMPLETED) {
-      if (input.productId || input.importQuantity || input.importPrice !== undefined) {
-        await this.importsRepository.update(id, {
-          ...(input.productId ? { productId: input.productId } : {}),
-          ...(input.importPrice !== undefined ? { importPrice: input.importPrice } : {}),
-          ...(input.importQuantity ? { importQuantity: input.importQuantity } : {}),
-          ...(input.expireDate !== undefined ? { expireDate: input.expireDate ? new Date(input.expireDate) : null } : {}),
-          ...(input.importNote !== undefined ? { importNote: input.importNote?.trim() ?? null } : {}),
+      await tx.importReceipt.update({
+        where: { id },
+        data: {
+          ...(input.importCode !== undefined ? { importCode: input.importCode.trim() } : {}),
+          ...(input.importNote !== undefined ? { importNote: input.importNote.trim() || null } : {}),
           updatedBy: actorId,
+        },
+      });
+      if (input.items) {
+        await tx.importProduct.deleteMany({ where: { importReceiptId: id } });
+        await tx.importProduct.createMany({
+          data: input.items.map((item) => ({
+            importReceiptId: id,
+            productId: item.productId,
+            importPrice: item.importPrice,
+            importQuantity: item.importQuantity,
+            expireDate: item.expireDate ? new Date(item.expireDate) : null,
+            lineNote: item.lineNote?.trim() || null,
+            createdBy: actorId,
+            updatedBy: actorId,
+          })),
         });
       }
-      return this.complete(id, actorId);
-    }
-
-    if (input.status === ImportStatus.CANCELLED) {
-      return this.cancel(id, actorId);
-    }
-
-    if (input.productId && input.productId !== current.productId) {
-      const product = await this.productsRepository.findById(input.productId);
-      if (!product) {
-        throw new NotFoundException('Sản phẩm không tồn tại');
-      }
-    }
-
-    if (input.importCode && input.importCode.trim() !== current.importCode) {
-      const existing = await this.importsRepository.findByImportCode(input.importCode.trim());
-      if (existing) {
-        throw new ConflictException('Mã phiếu nhập đã tồn tại');
-      }
-    }
-
-    const updated = await this.importsRepository.update(id, {
-      ...(input.productId ? { productId: input.productId } : {}),
-      ...(input.importPrice !== undefined ? { importPrice: input.importPrice } : {}),
-      ...(input.importQuantity ? { importQuantity: input.importQuantity } : {}),
-      ...(input.importCode ? { importCode: input.importCode.trim() } : {}),
-      ...(input.expireDate !== undefined ? { expireDate: input.expireDate ? new Date(input.expireDate) : null } : {}),
-      ...(input.importNote !== undefined ? { importNote: input.importNote?.trim() ?? null } : {}),
-      updatedBy: actorId,
     });
 
-    return this.findById(updated.id);
+    if (input.status === ImportStatus.COMPLETED) return this.complete(id, actorId);
+    if (input.status === ImportStatus.CANCELLED) return this.cancel(id, actorId);
+    return this.findById(id);
   }
 
   async complete(id: string, actorId: string): Promise<ImportResponseDto> {
-    const current = await this.getImport(id);
-    if (current.status === ImportStatus.COMPLETED) {
-      return this.findById(current.id);
-    }
-    if (current.status === ImportStatus.CANCELLED) {
-      throw new BadRequestException('Không thể hoàn thành phiếu đã hủy');
-    }
-
-    const completed = await this.importsRepository.completeWithStock(id, actorId);
-    return this.findById(completed.id);
+    await this.prisma.$transaction(async (tx) => {
+      const receipt = await tx.importReceipt.findFirst({
+        where: { id, deleteAt: null },
+        include: { importProducts: { include: { product: true } } },
+      });
+      if (!receipt) throw new NotFoundException('Phiếu nhập kho không tồn tại');
+      if (receipt.status === ImportStatus.COMPLETED) return;
+      if (receipt.status === ImportStatus.CANCELLED) {
+        throw new BadRequestException('Không thể hoàn thành phiếu đã hủy');
+      }
+      if (receipt.importProducts.some((item) => item.product.deleteAt !== null)) {
+        throw new BadRequestException('Phiếu có sản phẩm đã bị xóa');
+      }
+      const now = new Date();
+      const changed = await tx.importReceipt.updateMany({
+        where: { id, status: ImportStatus.DRAFT, deleteAt: null },
+        data: { status: ImportStatus.COMPLETED, completedAt: now, updatedBy: actorId },
+      });
+      if (changed.count !== 1) throw new ConflictException('Phiếu nhập đã được xử lý');
+      await tx.$executeRaw(Prisma.sql`
+        UPDATE fish_erp.import_product AS item
+        SET product_code_snapshot = product.product_code,
+            product_name_snapshot = product.product_name,
+            product_unit_snapshot = product.product_unit,
+            updated_by = ${actorId}::uuid,
+            updated_at = NOW()
+        FROM fish_erp.product AS product
+        WHERE item.product_id = product.id AND item.import_receipt_id = ${id}::uuid
+      `);
+      await this.stockService.apply(tx, {
+        adjustments: receipt.importProducts.map((item) => ({
+          productId: item.productId,
+          quantityDelta: item.importQuantity,
+          unitPrice: Number(item.importPrice),
+        })),
+        movementType: InventoryMovementType.IMPORT_COMPLETED,
+        documentType: InventoryDocumentType.IMPORT,
+        documentId: id,
+        documentCode: receipt.importCode,
+        occurredAt: now,
+        actorId,
+      });
+    });
+    return this.findById(id);
   }
 
   async cancel(id: string, actorId: string): Promise<ImportResponseDto> {
-    const current = await this.getImport(id);
-    if (current.status === ImportStatus.CANCELLED) {
-      return this.findById(current.id);
-    }
-
-    const cancelled = await this.importsRepository.cancelWithStock(id, actorId);
-    return this.findById(cancelled.id);
+    await this.prisma.$transaction(async (tx) => {
+      const receipt = await tx.importReceipt.findFirst({
+        where: { id, deleteAt: null },
+        include: { importProducts: true },
+      });
+      if (!receipt) throw new NotFoundException('Phiếu nhập kho không tồn tại');
+      if (receipt.status === ImportStatus.CANCELLED) return;
+      const wasCompleted = receipt.status === ImportStatus.COMPLETED;
+      const now = new Date();
+      const changed = await tx.importReceipt.updateMany({
+        where: { id, status: receipt.status, deleteAt: null },
+        data: { status: ImportStatus.CANCELLED, cancelledAt: now, updatedBy: actorId },
+      });
+      if (changed.count !== 1) throw new ConflictException('Phiếu nhập đã được xử lý');
+      if (wasCompleted) {
+        await this.stockService.apply(tx, {
+          adjustments: receipt.importProducts.map((item) => ({
+            productId: item.productId,
+            quantityDelta: -item.importQuantity,
+            unitPrice: Number(item.importPrice),
+          })),
+          movementType: InventoryMovementType.IMPORT_CANCELLED,
+          documentType: InventoryDocumentType.IMPORT,
+          documentId: id,
+          documentCode: receipt.importCode,
+          occurredAt: now,
+          actorId,
+        });
+      }
+    });
+    return this.findById(id);
   }
 
   async delete(id: string, actorId: string): Promise<void> {
-    await this.getImport(id);
-    await this.importsRepository.softDeleteWithStock(id, actorId);
-  }
-
-  private async getImport(id: string): Promise<ImportRecord> {
-    const record = await this.importsRepository.findById(id);
-    if (!record) {
-      throw new NotFoundException('Phiếu nhập kho không tồn tại');
+    const receipt = await this.getReceipt(id);
+    if (receipt.status === ImportStatus.COMPLETED) {
+      throw new BadRequestException('Phiếu đã hoàn thành phải được hủy trước khi xóa');
     }
-    return record;
+    await this.prisma.importReceipt.update({
+      where: { id },
+      data: { deleteAt: new Date(), deleteBy: actorId, updatedBy: actorId },
+    });
   }
 
-  private async generateImportCode(): Promise<string> {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const prefix = `IMP-${year}${month}-`;
+  private async getReceipt(id: string) {
+    const receipt = await this.prisma.importReceipt.findFirst({
+      where: { id, deleteAt: null },
+      select: { id: true, importCode: true, status: true },
+    });
+    if (!receipt) throw new NotFoundException('Phiếu nhập kho không tồn tại');
+    return receipt;
+  }
 
-    const count = await this.importsRepository.countByMonth(prefix);
-    let sequence = count + 1;
-    let candidate = `${prefix}${String(sequence).padStart(4, '0')}`;
-
-    while (await this.importsRepository.findByImportCode(candidate)) {
-      sequence += 1;
-      candidate = `${prefix}${String(sequence).padStart(4, '0')}`;
+  private ensureDistinctProducts(items: CreateImportItemDto[]): void {
+    const ids = items.map((item) => item.productId);
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException('Mỗi sản phẩm chỉ được xuất hiện một lần trong phiếu nhập');
     }
-
-    return candidate;
   }
 
-  private toResponse(record: ImportRecord): ImportResponseDto {
-    const importPrice = Number(record.importPrice);
-    const totalPrice = importPrice * record.importQuantity;
+  private async findProducts(tx: Prisma.TransactionClient, ids: string[]): Promise<Product[]> {
+    const products = await tx.product.findMany({ where: { id: { in: ids }, deleteAt: null } });
+    if (products.length !== ids.length) throw new NotFoundException('Có sản phẩm không tồn tại');
+    return products;
+  }
 
+  private toResponse(receipt: ImportReceiptRecord): ImportResponseDto {
+    const items: ImportItemResponseDto[] = receipt.importProducts.map((item) => ({
+      id: item.id,
+      productId: item.productId,
+      importPrice: Number(item.importPrice),
+      importQuantity: item.importQuantity,
+      totalPrice: Number(item.importPrice) * item.importQuantity,
+      expireDate: item.expireDate,
+      lineNote: item.lineNote,
+      product: {
+        id: item.product.id,
+        productCode: item.productCodeSnapshot ?? item.product.productCode,
+        productName: item.productNameSnapshot ?? item.product.productName,
+        productPrice: Number(item.product.productPrice),
+        remainingQuantity: item.product.remainingQuantity,
+        productUnit: item.productUnitSnapshot ?? item.product.productUnit,
+        productNote: item.product.productNote,
+        type: item.product.type,
+        status: item.product.status,
+        createdAt: item.product.createdAt,
+        updatedAt: item.product.updatedAt,
+      },
+    }));
     return {
-      id: record.id,
-      importCode: record.importCode,
-      importPrice,
-      importQuantity: record.importQuantity,
-      totalPrice,
-      expireDate: record.expireDate,
-      importNote: record.importNote,
-      status: record.status,
-      completedAt: record.completedAt,
-      cancelledAt: record.cancelledAt,
-      productId: record.productId,
-      product: record.product
-        ? {
-            id: record.product.id,
-            productCode: record.product.productCode,
-            productName: record.product.productName,
-            productUnit: record.product.productUnit,
-            productPrice: Number(record.product.productPrice),
-            remainingQuantity: record.product.remainingQuantity,
-            type: record.product.type,
-            status: record.product.status,
-          }
-        : undefined,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-      createdBy: record.createdBy,
-      updatedBy: record.updatedBy,
+      id: receipt.id,
+      importCode: receipt.importCode,
+      importNote: receipt.importNote,
+      status: receipt.status,
+      completedAt: receipt.completedAt,
+      cancelledAt: receipt.cancelledAt,
+      items,
+      totalQuantity: items.reduce((sum, item) => sum + item.importQuantity, 0),
+      totalAmount: items.reduce((sum, item) => sum + item.totalPrice, 0),
+      createdAt: receipt.createdAt,
+      updatedAt: receipt.updatedAt,
     };
   }
 }

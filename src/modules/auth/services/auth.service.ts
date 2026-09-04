@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { UserStatus } from '../../../common/domain/enums.js';
+import { normalizeVietnamPhoneNumber } from '../../../common/utils/phone-number.js';
 import type { AuthTokensResponseDto } from '../dto/auth-response.dto.js';
 import type { LoginDto } from '../dto/login.dto.js';
 import type { AuthenticatedUser } from '../interfaces/authenticated-user.js';
@@ -25,13 +26,19 @@ export class AuthService {
   ) {}
 
   async login(input: LoginDto, metadata: AuthRequestMetadata): Promise<AuthTokensResponseDto> {
-    const user = await this.authRepository.findUserByEmail(input.email.trim().toLowerCase());
+    const rawIdentifier = input.identifier.trim();
+    const identifier = rawIdentifier.includes('@')
+      ? rawIdentifier.toLowerCase()
+      : normalizeVietnamPhoneNumber(rawIdentifier);
+    const user = identifier
+      ? await this.authRepository.findUserByIdentifier(identifier)
+      : null;
     if (
       !user ||
       user.status !== UserStatus.ACTIVE ||
       !(await this.verifyPassword(user, input.password))
     ) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Email/số điện thoại hoặc mật khẩu không đúng');
     }
 
     const sessionId = randomUUID();

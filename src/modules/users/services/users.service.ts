@@ -8,6 +8,7 @@ import type { UserListResponseDto, UserResponseDto } from '../dto/user-response.
 import type { FindUserStatus, UserRecord } from '../repositories/users.repository.js';
 import { UsersRepository } from '../repositories/users.repository.js';
 import { ERROR_CODE } from '../../../common/domain/error-code.js';
+import { normalizeVietnamPhoneNumber } from '../../../common/utils/phone-number.js';
 
 @Injectable()
 export class UsersService {
@@ -15,11 +16,12 @@ export class UsersService {
 
   async create(input: CreateUserDto, actorId: string): Promise<UserResponseDto> {
     const email = this.normalizeEmail(input.email);
+    const phoneNumber = this.normalizePhoneNumber(input.phoneNumber);
     await this.ensureEmailAvailable(email);
-    await this.ensurePhoneNumberAvailable(input.phoneNumber);
+    await this.ensurePhoneNumberAvailable(phoneNumber);
     const user = await this.usersRepository.create({
       email,
-      phoneNumber: input.phoneNumber.trim(),
+      phoneNumber,
       passwordHash: await argon2.hash(input.password),
       ...(input.displayName === undefined ? {} : { displayName: input.displayName.trim() }),
       ...(input.fullName === undefined ? {} : { fullName: input.fullName.trim() }),
@@ -57,7 +59,9 @@ export class UsersService {
   async update(id: string, input: UpdateUserDto, actorId: string): Promise<UserResponseDto> {
     const currentUser = await this.getUser(id);
     const email = input.email ? this.normalizeEmail(input.email) : undefined;
-    const phoneNumber = input.phoneNumber?.trim();
+    const phoneNumber = input.phoneNumber
+      ? this.normalizePhoneNumber(input.phoneNumber)
+      : undefined;
 
     if (email && email !== currentUser.email) {
       await this.ensureEmailAvailable(email);
@@ -153,6 +157,14 @@ export class UsersService {
 
   private normalizeEmail(email: string): string {
     return email.trim().toLowerCase();
+  }
+
+  private normalizePhoneNumber(phoneNumber: string): string {
+    const normalized = normalizeVietnamPhoneNumber(phoneNumber);
+    if (!normalized) {
+      throw new ConflictException('Số điện thoại Việt Nam không hợp lệ');
+    }
+    return normalized;
   }
 
   private toResponse(user: UserRecord): UserResponseDto {

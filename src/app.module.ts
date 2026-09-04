@@ -7,8 +7,10 @@ import { AllExceptionsFilter } from './common/filters/all-exceptions.filter.js';
 import { BigIntSerializationInterceptor } from './common/interceptors/bigint-serialization.interceptor.js';
 import { PrismaModule } from './infrastructure/database/prisma/prisma.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
+import { ExportsModule } from './modules/exports/exports.module.js';
 import { ImportsModule } from './modules/imports/imports.module.js';
 import { ProductsModule } from './modules/products/products.module.js';
+import { ReportsModule } from './modules/reports/reports.module.js';
 import { UsersModule } from './modules/users/users.module.js';
 
 @Module({
@@ -35,6 +37,8 @@ import { UsersModule } from './modules/users/users.module.js';
     UsersModule,
     ProductsModule,
     ImportsModule,
+    ExportsModule,
+    ReportsModule,
   ],
   providers: [
     {

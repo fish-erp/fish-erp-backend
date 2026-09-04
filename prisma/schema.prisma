@@ -117,8 +117,9 @@ model Product {
   type   ProductType   @default(UNKNOWN)
   status ProductStatus @default(SELLING)
 
-  importProducts ImportProduct[]
-  exportProducts ExportProduct[]
+  importProducts     ImportProduct[]
+  exportProducts     ExportProduct[]
+  inventoryMovements InventoryMovement[]
 
   deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
   deleteBy String?   @map("delete_by") @db.Uuid
@@ -150,22 +151,46 @@ enum ImportStatus {
 model ImportProduct {
   id String @id @default(uuid()) @db.Uuid
 
-  importCode  String  @unique @map("import_code") @db.VarChar(50) // Mã phiếu nhập, ví dụ IMP-202609-0001
-  importPrice Decimal @map("import_price") @db.Decimal(18, 2) // Giá nhập riêng của lô này
+  importPrice    Decimal   @map("import_price") @db.Decimal(18, 2) // Giá nhập riêng của lô này
+  importQuantity Int       @map("import_quantity") @db.Integer // Số lượng nhập, chỉ nhận số nguyên dương
+  expireDate     DateTime? @map("expire_date") @db.Timestamptz(3) // Ngày hết hạn, không có thì để null
+  lineNote       String?   @map("line_note") @db.VarChar(500) // Ghi chú riêng cho dòng sản phẩm
 
-  importQuantity Int @map("import_quantity") @db.Integer // Số lượng nhập, chỉ nhận số nguyên dương
+  // Snapshot thông tin sản phẩm khi phiếu hoàn thành để lịch sử không đổi theo Product hiện tại
+  productCodeSnapshot String? @map("product_code_snapshot") @db.VarChar(50)
+  productNameSnapshot String? @map("product_name_snapshot") @db.VarChar(255)
+  productUnitSnapshot String? @map("product_unit_snapshot") @db.VarChar(20)
 
-  expireDate DateTime? @map("expire_date") @db.Timestamptz(3) // Ngày hết hạn, không có thì để null
-  importNote String?   @map("import_note") @db.VarChar(1000) // Ghi chú lần nhập
+  importReceiptId String        @map("import_receipt_id") @db.Uuid
+  importReceipt   ImportReceipt @relation(fields: [importReceiptId], references: [id], onDelete: Cascade)
 
-  status ImportStatus @default(DRAFT)
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  updatedBy String?  @map("updated_by") @db.Uuid
+
+  @@unique([importReceiptId, productId])
+  @@index([productId, expireDate])
+  @@map("import_product")
+  @@schema("fish_erp")
+}
+
+// Phần đầu phiếu nhập, chứa thông tin chung và có thể có nhiều dòng sản phẩm
+model ImportReceipt {
+  id String @id @default(uuid()) @db.Uuid
+
+  importCode String       @unique @map("import_code") @db.VarChar(50) // Ví dụ IMP-202609-0001
+  status     ImportStatus @default(DRAFT)
+  importNote String?      @map("import_note") @db.VarChar(1000) // Ghi chú chung của phiếu nhập
 
   // Thời điểm nghiệp vụ để lọc báo cáo; DB lưu timestamptz, ứng dụng hiển thị theo Asia/Ho_Chi_Minh
   completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
   cancelledAt DateTime? @map("cancelled_at") @db.Timestamptz(3)
 
-  productId String  @map("product_id") @db.Uuid
-  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  importProducts ImportProduct[]
 
   deleteAt DateTime? @map("delete_at") @db.Timestamptz(3)
   deleteBy String?   @map("delete_by") @db.Uuid
@@ -175,10 +200,9 @@ model ImportProduct {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
   updatedBy String?  @map("updated_by") @db.Uuid
 
-  @@index([productId, status, expireDate])
   @@index([status, completedAt])
   @@index([createdAt])
-  @@map("import_product")
+  @@map("import_receipt")
   @@schema("fish_erp")
 }
 
@@ -247,6 +271,11 @@ model ExportProduct {
   unitPrice Decimal? @map("unit_price") @db.Decimal(18, 2)
   lineNote  String?  @map("line_note") @db.VarChar(500) // Ghi chú riêng cho dòng sản phẩm
 
+  // Snapshot thông tin sản phẩm khi hóa đơn hoàn thành
+  productCodeSnapshot String? @map("product_code_snapshot") @db.VarChar(50)
+  productNameSnapshot String? @map("product_name_snapshot") @db.VarChar(255)
+  productUnitSnapshot String? @map("product_unit_snapshot") @db.VarChar(20)
+
   exportInvoiceId String        @map("export_invoice_id") @db.Uuid
   exportInvoice   ExportInvoice @relation(fields: [exportInvoiceId], references: [id], onDelete: Cascade)
 
@@ -265,3 +294,63 @@ model ExportProduct {
 }
 
 // ==== END OF EXPORT ====
+
+// ==== START OF INVENTORY MOVEMENT ====
+
+enum InventoryMovementType {
+  OPENING_BALANCE // Tồn đầu kỳ trước khi hệ thống bắt đầu ghi sổ biến động
+  IMPORT_COMPLETED // Hoàn thành nhập kho, cộng tồn
+  IMPORT_CANCELLED // Hủy phiếu nhập đã hoàn thành, trừ lại tồn
+  EXPORT_COMPLETED // Hoàn thành xuất hàng, trừ tồn
+  EXPORT_CANCELLED // Hủy phiếu xuất đã hoàn thành, hoàn lại tồn
+
+  @@map("inventory_movement_type")
+  @@schema("fish_erp")
+}
+
+enum InventoryDocumentType {
+  OPENING // Dữ liệu tồn đầu kỳ khi khởi tạo sổ kho
+  IMPORT // Phiếu nhập kho
+  EXPORT // Phiếu xuất hàng
+
+  @@map("inventory_document_type")
+  @@schema("fish_erp")
+}
+
+// Sổ biến động tồn kho; quantityDelta dương là nhập, âm là xuất
+model InventoryMovement {
+  id String @id @default(uuid()) @db.Uuid
+
+  movementType  InventoryMovementType @map("movement_type")
+  documentType  InventoryDocumentType @map("document_type")
+  documentId    String                @map("document_id") @db.Uuid
+  documentCode  String                @map("document_code") @db.VarChar(50)
+  quantityDelta Int                   @map("quantity_delta") @db.Integer
+  unitPrice     Decimal?              @map("unit_price") @db.Decimal(18, 2)
+  occurredAt    DateTime              @map("occurred_at") @db.Timestamptz(3)
+
+  productId String  @map("product_id") @db.Uuid
+  product   Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String?  @map("created_by") @db.Uuid
+
+  @@unique([movementType, documentId, productId])
+  @@index([productId, occurredAt])
+  @@index([movementType, occurredAt])
+  @@index([occurredAt])
+  @@map("inventory_movement")
+  @@schema("fish_erp")
+}
+
+// Bộ đếm sinh mã phiếu theo tháng, tránh trùng mã khi nhiều request chạy đồng thời
+model DocumentSequence {
+  key       String   @id @db.VarChar(30)
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("document_sequence")
+  @@schema("fish_erp")
+}
+
+// ==== END OF INVENTORY MOVEMENT ====
