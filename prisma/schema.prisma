@@ -242,6 +242,7 @@ model ExportInvoice {
   customerPhone   String? @map("customer_phone") @db.VarChar(20) // Số điện thoại khách hàng
   deliveryAddress String? @map("delivery_address") @db.VarChar(500) // Địa chỉ giao hàng
   exportNote      String? @map("export_note") @db.VarChar(1000) // Ghi chú hóa đơn
+  shippingFee     Decimal @default(0) @map("shipping_fee") @db.Decimal(18, 2) // Phí giao hàng (tiền ship)
   paidAmount      Decimal? @default(0) @map("planned_paid_amount") @db.Decimal(18, 2)
   payments        CustomerPayment[]
 

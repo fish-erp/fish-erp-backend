@@ -42,10 +42,14 @@ export class CustomersService {
           GREATEST(0, COALESCE(payments.amount, 0) - COALESCE(purchases.amount, 0)) AS "advanceAmount"
         FROM fish_erp.customer c
         LEFT JOIN LATERAL (
-          SELECT SUM(ep.unit_price * ep.export_quantity) AS amount
-          FROM fish_erp.export_invoice ei
-          JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
-          WHERE ei.customer_id = c.id AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+          SELECT SUM(inv.total) AS amount
+          FROM (
+            SELECT COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) + COALESCE(ei.shipping_fee, 0) AS total
+            FROM fish_erp.export_invoice ei
+            JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
+            WHERE ei.customer_id = c.id AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+            GROUP BY ei.id, ei.shipping_fee
+          ) inv
         ) purchases ON true
         LEFT JOIN LATERAL (
           SELECT SUM(cp.amount) AS amount
@@ -83,10 +87,14 @@ export class CustomersService {
 
     const [purchasesAgg, paymentsAgg] = await Promise.all([
       this.prisma.$queryRaw<Array<{ total: Prisma.Decimal }>>(Prisma.sql`
-        SELECT COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) AS total
-        FROM fish_erp.export_invoice ei
-        JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
-        WHERE ei.customer_id = ${id}::uuid AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+        SELECT COALESCE(SUM(inv.total), 0) AS total
+        FROM (
+          SELECT COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) + COALESCE(ei.shipping_fee, 0) AS total
+          FROM fish_erp.export_invoice ei
+          JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
+          WHERE ei.customer_id = ${id}::uuid AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+          GROUP BY ei.id, ei.shipping_fee
+        ) inv
       `),
       this.prisma.customerPayment.aggregate({
         where: { customerId: id, reversedAt: null },

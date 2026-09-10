@@ -51,6 +51,8 @@ export class ExportResponseDto {
   @ApiProperty()
   totalQuantity!: number;
   @ApiProperty()
+  shippingFee!: number;
+  @ApiProperty()
   totalAmount!: number;
   @ApiProperty()
   createdAt!: Date;

@@ -61,13 +61,18 @@ export class ExportsService {
       if (await tx.exportInvoice.findUnique({ where: { invoiceCode }, select: { id: true } })) {
         throw new ConflictException('Mã phiếu xuất đã tồn tại');
       }
+      const exportType = input.exportType ?? ExportType.AT_HOME;
+      const shippingFee = exportType === ExportType.DELIVERY
+        ? (input.shippingFee !== undefined && input.shippingFee !== null ? input.shippingFee : 5000)
+        : 0;
       const invoice = await tx.exportInvoice.create({
         data: {
           ...(await this.customerSnapshot(tx, input.customerId)),
           paidAmount: input.paidAmount ?? 0,
           invoiceCode,
-          exportType: input.exportType ?? ExportType.AT_HOME,
+          exportType,
           exportStatus: status,
+          shippingFee,
           ...(input.customerId ? {} : { customerName: input.customerName?.trim() || null, customerPhone: input.customerPhone?.trim() || null }),
           deliveryAddress: input.deliveryAddress?.trim() || null,
           exportNote: input.exportNote?.trim() || null,
@@ -208,6 +213,13 @@ export class ExportsService {
           ...(input.customerId !== undefined ? await this.customerSnapshot(tx, input.customerId) : {}),
           ...(input.paidAmount !== undefined ? { plannedPaidAmount: input.paidAmount } : {}),
           ...(input.exportType !== undefined ? { exportType: input.exportType } : {}),
+          ...(input.shippingFee !== undefined
+            ? { shippingFee: input.shippingFee }
+            : input.exportType === ExportType.AT_HOME
+            ? { shippingFee: 0 }
+            : input.exportType === ExportType.DELIVERY && locked.exportType !== ExportType.DELIVERY
+            ? { shippingFee: 5000 }
+            : {}),
           ...(!input.customerId && !locked.customerId && input.customerName !== undefined ? { customerName: input.customerName.trim() || null } : {}),
           ...(!input.customerId && !locked.customerId && input.customerPhone !== undefined ? { customerPhone: input.customerPhone.trim() || null } : {}),
           ...(input.deliveryAddress !== undefined ? { deliveryAddress: input.deliveryAddress.trim() || null } : {}),
@@ -366,13 +378,13 @@ export class ExportsService {
       ),
       invoice_totals AS (
         SELECT ei.id, ei.customer_id, ei.created_at,
-          COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) AS invoice_total
+          COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) + COALESCE(ei.shipping_fee, 0) AS invoice_total
         FROM fish_erp.export_invoice ei
         JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
         WHERE ei.customer_id IN (${Prisma.join(validIds.map(id => Prisma.sql`${id}::uuid`))})
           AND ei."exportStatus" = 'COMPLETED'
           AND ei.delete_at IS NULL
-        GROUP BY ei.id, ei.customer_id, ei.created_at
+        GROUP BY ei.id, ei.customer_id, ei.created_at, ei.shipping_fee
       ),
       invoice_fifo AS (
         SELECT it.id, it.customer_id, it.invoice_total,
@@ -420,7 +432,11 @@ export class ExportsService {
         updatedAt: item.product.updatedAt,
       },
     }));
-    const total = invoice.exportProducts.reduce((sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice ?? item.product.productPrice).mul(item.exportQuantity)), new Prisma.Decimal(0));
+    const shippingFee = invoice.shippingFee ? Number(invoice.shippingFee) : 0;
+    const total = invoice.exportProducts.reduce(
+      (sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice ?? item.product.productPrice).mul(item.exportQuantity)),
+      new Prisma.Decimal(shippingFee),
+    );
     const isCompleted = invoice.exportStatus === ExportStatus.COMPLETED;
     const fifo = isCompleted && invoice.id ? fifoMap?.get(invoice.id) : undefined;
 
@@ -466,6 +482,7 @@ export class ExportsService {
       cancelledAt: invoice.cancelledAt,
       items,
       totalQuantity: items.reduce((sum, item) => sum + item.exportQuantity, 0),
+      shippingFee,
       totalAmount: total.toNumber(),
       createdAt: invoice.createdAt,
       updatedAt: invoice.updatedAt,
