@@ -3,7 +3,6 @@ import {
   IsEmail,
   IsEnum,
   IsOptional,
-  IsPhoneNumber,
   IsString,
   MaxLength,
   MinLength,
@@ -19,7 +18,7 @@ export class UpdateUserDto {
 
   @ApiPropertyOptional({ example: '+84901234567' })
   @IsOptional()
-  @IsPhoneNumber()
+  @IsString()
   @MaxLength(20)
   phoneNumber?: string;
 

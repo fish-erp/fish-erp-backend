@@ -51,10 +51,10 @@ describe('Authentication and Users API (e2e)', () => {
     await app.close();
   });
 
-  async function login(email: string): Promise<TokenPair> {
+  async function login(identifier: string): Promise<TokenPair> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ email, password: 'password123' })
+      .send({ identifier, password: 'password123' })
       .expect(200);
     return response.body as TokenPair;
   }
@@ -62,7 +62,7 @@ describe('Authentication and Users API (e2e)', () => {
   it('rejects invalid credentials', async () => {
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ email: 'admin@example.com', password: 'wrong-password' })
+      .send({ identifier: 'admin@example.com', password: 'wrong-password' })
       .expect(401);
   });
 
@@ -73,7 +73,7 @@ describe('Authentication and Users API (e2e)', () => {
     });
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ email: 'user@example.com', password: 'password123' })
+      .send({ identifier: 'user@example.com', password: 'password123' })
       .expect(401);
 
     await prisma.user.update({
@@ -82,8 +82,15 @@ describe('Authentication and Users API (e2e)', () => {
     });
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ email: 'user@example.com', password: 'password123' })
+      .send({ identifier: 'user@example.com', password: 'password123' })
       .expect(401);
+  });
+
+  it('accepts local, country-code and E.164 phone formats', async () => {
+    for (const identifier of ['0901234567', '84901234567', '+84901234567']) {
+      const pair = await login(identifier);
+      expect(pair.accessToken).toBeTruthy();
+    }
   });
 
   it('allows an admin to run the basic user CRUD flow', async () => {

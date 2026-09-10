@@ -1,0 +1,29 @@
+name: fish-erp
+
+services:
+  backend:
+    container_name: fish-erp-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fish-erp-backend:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env.prod
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://4.213.53.132}
+    expose:
+      - "8080"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8080/api/v1/auth/me').then(() => process.exit(0)).catch(() => process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

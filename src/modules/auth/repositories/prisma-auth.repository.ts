@@ -13,9 +13,9 @@ export class PrismaAuthRepository extends AuthRepository {
     super();
   }
 
-  findUserByEmail(email: string): Promise<AuthUserRecord | null> {
-    return this.prisma.user.findUnique({
-      where: { email },
+  findUserByIdentifier(identifier: string): Promise<AuthUserRecord | null> {
+    return this.prisma.user.findFirst({
+      where: { OR: [{ email: identifier }, { phoneNumber: identifier }] },
       select: { id: true, email: true, passwordHash: true, role: true, status: true },
     });
   }

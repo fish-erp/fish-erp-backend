@@ -26,7 +26,7 @@ export interface CreateAuthSessionData {
 }
 
 export abstract class AuthRepository {
-  abstract findUserByEmail(email: string): Promise<AuthUserRecord | null>;
+  abstract findUserByIdentifier(identifier: string): Promise<AuthUserRecord | null>;
   abstract findUserById(id: string): Promise<AuthUserRecord | null>;
   abstract createSession(data: CreateAuthSessionData): Promise<void>;
   abstract findSession(id: string): Promise<AuthSessionRecord | null>;

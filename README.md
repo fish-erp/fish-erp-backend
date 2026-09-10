@@ -1,6 +1,6 @@
 # Fish ERP Backend
 
-NestJS backend for managing fish feed and medicine ERP operations. The initial scope contains JWT authentication, role-based authorization, and administrator-only Users CRUD.
+NestJS backend for managing fish feed, medicine, warehouse receipts, outbound invoices and inventory reports.
 
 ## Stack
 
@@ -24,7 +24,7 @@ The API runs at `http://localhost:8080/api/v1` and Swagger at `http://localhost:
 
 | Method | Path                   | Description                              |
 | ------ | ---------------------- | ---------------------------------------- |
-| POST   | `/api/v1/auth/login`   | Issue access and refresh tokens          |
+| POST   | `/api/v1/auth/login`   | Login by email or Vietnamese phone number |
 | POST   | `/api/v1/auth/refresh` | Rotate the current refresh token         |
 | GET    | `/api/v1/auth/me`      | Return the authenticated identity        |
 | POST   | `/api/v1/auth/logout`  | Revoke the current authenticated session |
@@ -41,16 +41,24 @@ The API runs at `http://localhost:8080/api/v1` and Swagger at `http://localhost:
 
 All Users endpoints require the `ADMIN` role. Password hashes are never returned by the API.
 
-## Fresh database initialization
+## Warehouse API
 
-This repository intentionally contains no migration history. Point `DATABASE_URL` to the new database, then create the initial migration:
+- CRUD and state transitions: `/api/v1/imports` and `/api/v1/exports`
+- Inventory workbook: `/api/v1/reports/inventory.xlsx?from=YYYY-MM-DD&to=YYYY-MM-DD&includePrice=false`
+- Sales workbook: `/api/v1/reports/sales.xlsx?from=YYYY-MM-DD&to=YYYY-MM-DD&includePrice=false`
+
+Completing or cancelling a receipt/invoice updates `Product.remainingQuantity` and appends an `InventoryMovement` in one database transaction.
+
+## Database migration
+
+Back up the database, point `DATABASE_URL` to it and apply the checked-in migrations:
 
 ```bash
-pnpm exec prisma migrate dev --name init
+pnpm exec prisma migrate deploy
 pnpm prisma:generate
 ```
 
-The PostgreSQL namespace is `fish_erp`. Create the first `ADMIN` manually with an Argon2 password hash before using the administrator portal. No account is seeded automatically.
+The migration preserves Products and existing import receipts, backfills inventory movements and aborts if old stock cannot be reconciled. The PostgreSQL namespace is `fish_erp`. No account is seeded automatically.
 
 Business reports use `APP_TIMEZONE=Asia/Ho_Chi_Minh` when calculating daily, weekly and monthly date ranges. PostgreSQL timestamps remain stored as `timestamptz`.
 

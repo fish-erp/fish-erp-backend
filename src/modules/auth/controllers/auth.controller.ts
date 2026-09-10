@@ -23,7 +23,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login with email and password' })
+  @ApiOperation({ summary: 'Đăng nhập bằng email hoặc số điện thoại' })
   @ApiOkResponse({ type: AuthTokensResponseDto })
   @ApiUnauthorizedResponse({ description: 'Invalid credentials or disabled account' })
   login(@Body() input: LoginDto, @Req() request: FastifyRequest): Promise<AuthTokensResponseDto> {

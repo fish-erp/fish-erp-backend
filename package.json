@@ -21,10 +21,11 @@
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:create": "prisma migrate dev --create-only",
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "prisma:format": "prisma format",
-    "migrate:test": "prisma format && prisma validate && prisma migrate dev --create-only && prisma migrate deploy && prisma generate"
+    "migrate:test": "prisma format && prisma validate && prisma migrate deploy && prisma generate"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
@@ -42,6 +43,7 @@
     "argon2": "^0.45.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "exceljs": "^4.4.0",
     "fastify": "5.11.3",
     "nestjs-pino": "^4.6.1",
     "passport": "^0.7.0",
