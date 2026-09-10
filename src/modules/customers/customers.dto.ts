@@ -14,3 +14,16 @@ export class CustomerQuery extends ListUsersQueryDto {
   @IsOptional() @IsIn(['true', 'false', 'all']) archived?: string;
 }
 
+export class CustomerPaymentInput {
+  @IsNotEmpty() amount!: number;
+  @IsString() @IsNotEmpty() @MaxLength(100) idempotencyKey!: string;
+  @IsOptional() @IsString() @MaxLength(500) note?: string;
+  @IsOptional() @IsString() paidAt?: string;
+  @IsOptional() @IsString() invoiceId?: string;
+}
+
+export class CustomerReversalInput {
+  @IsString() @IsNotEmpty() @MaxLength(500) reason!: string;
+}
+
+
