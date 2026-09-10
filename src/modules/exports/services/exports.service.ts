@@ -64,8 +64,7 @@ export class ExportsService {
       const invoice = await tx.exportInvoice.create({
         data: {
           ...(await this.customerSnapshot(tx, input.customerId)),
-          paymentTracked: true,
-          plannedPaidAmount: input.paidAmount ?? null,
+          paidAmount: input.paidAmount ?? 0,
           invoiceCode,
           exportType: input.exportType ?? ExportType.AT_HOME,
           exportStatus: status,
@@ -122,6 +121,7 @@ export class ExportsService {
     const search = query.search?.trim();
     const where: Prisma.ExportInvoiceWhereInput = {
       deleteAt: null,
+      ...(query.customerId ? { customerId: query.customerId } : {}),
       ...(query.exportStatus ? { exportStatus: query.exportStatus } : {}),
       ...(query.exportType ? { exportType: query.exportType } : {}),
       ...(search
@@ -154,8 +154,10 @@ export class ExportsService {
       }),
       this.prisma.exportInvoice.count({ where }),
     ]);
+    const customerIds = items.map((i) => i.customerId).filter((id): id is string => Boolean(id));
+    const fifoMap = await this.getFifoMapForCustomerIds(customerIds);
     return {
-      data: items.map((item) => this.toResponse(item)),
+      data: items.map((item) => this.toResponse(item, fifoMap)),
       meta: {
         page: query.page,
         limit: query.limit,
@@ -171,7 +173,9 @@ export class ExportsService {
       include: { exportProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } }, payments: { orderBy: { paidAt: 'desc' } } },
     });
     if (!invoice) throw new NotFoundException('Phiếu xuất hàng không tồn tại');
-    return this.toResponse(invoice);
+    const customerIds = invoice.customerId ? [invoice.customerId] : [];
+    const fifoMap = await this.getFifoMapForCustomerIds(customerIds);
+    return this.toResponse(invoice, fifoMap);
   }
 
   async update(id: string, input: UpdateExportDto, actorId: string): Promise<ExportResponseDto> {
@@ -283,7 +287,7 @@ export class ExportsService {
   async cancel(id: string, actorId: string): Promise<ExportResponseDto> {
     await this.prisma.$transaction(async (tx) => {
       await lockInvoice(tx, id);
-      if (await tx.invoicePayment.count({ where: { invoiceId: id, reversedAt: null } })) throw new BadRequestException('Cần hoàn/đảo các khoản thu trước khi hủy phiếu');
+      if (await tx.customerPayment.count({ where: { invoiceId: id, reversedAt: null } })) throw new BadRequestException('Cần hoàn/đảo các khoản thu trước khi hủy phiếu');
       const invoice = await tx.exportInvoice.findFirst({
         where: { id, deleteAt: null },
         include: { exportProducts: true },
@@ -346,7 +350,56 @@ export class ExportsService {
     }
   }
 
-  private toResponse(invoice: ExportInvoiceRecord): ExportResponseDto {
+  // Tính toán phân bổ thanh toán FIFO cho các đơn hàng của khách hàng
+  async getFifoMapForCustomerIds(customerIds: string[]) {
+    const validIds = Array.from(new Set(customerIds.filter(Boolean)));
+    const map = new Map<string, { allocatedPaid: number; outstanding: number }>();
+    if (!validIds.length) return map;
+
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; allocated_paid: Prisma.Decimal; outstanding: Prisma.Decimal }>>(Prisma.sql`
+      WITH customer_payments AS (
+        SELECT customer_id, COALESCE(SUM(amount), 0) AS total_paid
+        FROM fish_erp.customer_payment
+        WHERE customer_id IN (${Prisma.join(validIds.map(id => Prisma.sql`${id}::uuid`))})
+          AND reversed_at IS NULL
+        GROUP BY customer_id
+      ),
+      invoice_totals AS (
+        SELECT ei.id, ei.customer_id, ei.created_at,
+          COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) AS invoice_total
+        FROM fish_erp.export_invoice ei
+        JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
+        WHERE ei.customer_id IN (${Prisma.join(validIds.map(id => Prisma.sql`${id}::uuid`))})
+          AND ei."exportStatus" = 'COMPLETED'
+          AND ei.delete_at IS NULL
+        GROUP BY ei.id, ei.customer_id, ei.created_at
+      ),
+      invoice_fifo AS (
+        SELECT it.id, it.customer_id, it.invoice_total,
+          COALESCE(SUM(it.invoice_total) OVER (
+            PARTITION BY it.customer_id 
+            ORDER BY it.created_at ASC, it.id ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+          ), 0) AS prev_cum
+        FROM invoice_totals it
+      )
+      SELECT f.id,
+        GREATEST(0, LEAST(f.invoice_total, COALESCE(cp.total_paid, 0) - f.prev_cum)) AS allocated_paid,
+        GREATEST(0, f.invoice_total - GREATEST(0, LEAST(f.invoice_total, COALESCE(cp.total_paid, 0) - f.prev_cum))) AS outstanding
+      FROM invoice_fifo f
+      LEFT JOIN customer_payments cp ON cp.customer_id = f.customer_id
+    `);
+
+    for (const r of rows) {
+      map.set(r.id, { allocatedPaid: Number(r.allocated_paid), outstanding: Number(r.outstanding) });
+    }
+    return map;
+  }
+
+  private toResponse(
+    invoice: ExportInvoiceRecord,
+    fifoMap?: Map<string, { allocatedPaid: number; outstanding: number }>,
+  ): ExportResponseDto {
     const items: ExportItemResponseDto[] = invoice.exportProducts.map((item) => ({
       id: item.id,
       productId: item.productId,
@@ -368,17 +421,38 @@ export class ExportsService {
       },
     }));
     const total = invoice.exportProducts.reduce((sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice ?? item.product.productPrice).mul(item.exportQuantity)), new Prisma.Decimal(0));
-    const paid = (invoice.payments ?? []).filter(p => !p.reversedAt).reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
-    const tracked = invoice.paymentTracked && invoice.exportStatus === ExportStatus.COMPLETED;
-    const outstanding = tracked ? total.minus(paid).toNumber() : null;
+    const isCompleted = invoice.exportStatus === ExportStatus.COMPLETED;
+    const fifo = isCompleted && invoice.id ? fifoMap?.get(invoice.id) : undefined;
+
+    let paidNum: number;
+    let outstandingNum: number;
+    if (fifo) {
+      paidNum = fifo.allocatedPaid;
+      outstandingNum = fifo.outstanding;
+    } else {
+      const paid = (invoice.payments ?? []).filter(p => !p.reversedAt).reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+      paidNum = paid.toNumber();
+      outstandingNum = Math.max(0, total.minus(paid).toNumber());
+    }
+
+    const paymentStatus = invoice.exportStatus === ExportStatus.CANCELLED
+      ? 'CANCELLED'
+      : invoice.exportStatus === ExportStatus.EDITING
+      ? 'DRAFT'
+      : outstandingNum === 0
+      ? 'PAID'
+      : paidNum > 0
+      ? 'PARTIAL'
+      : 'UNPAID';
+
     return {
       customerId: invoice.customerId,
-      reconciliationNote: invoice.reconciliationNote,
-      paymentTracked: invoice.paymentTracked,
-      plannedPaidAmount: invoice.plannedPaidAmount?.toNumber() ?? null,
-      paidAmount: tracked ? paid.toNumber() : null,
-      outstandingAmount: outstanding,
-      paymentStatus: invoice.exportStatus === ExportStatus.CANCELLED ? 'CANCELLED' : invoice.exportStatus === ExportStatus.EDITING ? 'DRAFT' : !tracked ? 'UNKNOWN' : outstanding === 0 ? 'PAID' : paid.gt(0) ? 'PARTIAL' : 'UNPAID',
+      reconciliationNote: null,
+      paymentTracked: true,
+      plannedPaidAmount: invoice.paidAmount ? Number(invoice.paidAmount) : null,
+      paidAmount: isCompleted ? paidNum : null,
+      outstandingAmount: isCompleted ? outstandingNum : null,
+      paymentStatus,
       payments: (invoice.payments ?? []).map(p => ({ id: p.id, amount: p.amount.toNumber(), note: p.note, paidAt: p.paidAt, createdBy: p.createdBy, reversedAt: p.reversedAt, reversalReason: p.reversalReason })),
       id: invoice.id,
       invoiceCode: invoice.invoiceCode,

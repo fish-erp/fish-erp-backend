@@ -33,36 +33,155 @@ export class CustomersService {
   }
   async list(query: CustomerQuery) {
     const search = query.search?.trim();
-    // Aggregate debt before pagination, using immutable invoice prices and effective payments.
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; name: string; phoneNumber: string; address: string | null; archived: boolean; outstandingAmount: Prisma.Decimal; unknownCount: bigint; total: bigint }>>(Prisma.sql`
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; name: string; phoneNumber: string; address: string | null; archived: boolean; totalPurchased: Prisma.Decimal; totalPaid: Prisma.Decimal; outstandingAmount: Prisma.Decimal; advanceAmount: Prisma.Decimal; total: bigint }>>(Prisma.sql`
       WITH summary AS (
         SELECT c.id, c.name, c.phone_number AS "phoneNumber", c.address, c.archived,
-          COALESCE(SUM(CASE WHEN i.payment_tracked THEN COALESCE(t.amount,0)-COALESCE(p.amount,0) ELSE 0 END),0) AS "outstandingAmount",
-          COUNT(i.id) FILTER (WHERE NOT i.payment_tracked) AS "unknownCount"
+          COALESCE(purchases.amount, 0) AS "totalPurchased",
+          COALESCE(payments.amount, 0) AS "totalPaid",
+          GREATEST(0, COALESCE(purchases.amount, 0) - COALESCE(payments.amount, 0)) AS "outstandingAmount",
+          GREATEST(0, COALESCE(payments.amount, 0) - COALESCE(purchases.amount, 0)) AS "advanceAmount"
         FROM fish_erp.customer c
-        LEFT JOIN fish_erp.export_invoice i ON i.customer_id=c.id AND i."exportStatus"='COMPLETED' AND i.delete_at IS NULL
-        LEFT JOIN LATERAL (SELECT SUM(unit_price*export_quantity) amount FROM fish_erp.export_product WHERE export_invoice_id=i.id) t ON true
-        LEFT JOIN LATERAL (SELECT SUM(amount) amount FROM fish_erp.invoice_payment WHERE invoice_id=i.id AND reversed_at IS NULL) p ON true
-        WHERE (${query.archived === 'all'} OR c.archived=${query.archived === 'true'})
+        LEFT JOIN LATERAL (
+          SELECT SUM(ep.unit_price * ep.export_quantity) AS amount
+          FROM fish_erp.export_invoice ei
+          JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
+          WHERE ei.customer_id = c.id AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+        ) purchases ON true
+        LEFT JOIN LATERAL (
+          SELECT SUM(cp.amount) AS amount
+          FROM fish_erp.customer_payment cp
+          WHERE cp.customer_id = c.id AND cp.reversed_at IS NULL
+        ) payments ON true
+        WHERE (${query.archived === 'all'} OR c.archived = ${query.archived === 'true'})
           AND (${!search} OR c.name ILIKE ${'%' + (search ?? '') + '%'} OR c.phone_number ILIKE ${'%' + (search ?? '') + '%'})
-        GROUP BY c.id
+        GROUP BY c.id, purchases.amount, payments.amount
       )
       SELECT *, COUNT(*) OVER() AS total FROM summary
-      WHERE (${query.debtOnly !== 'true'} OR "outstandingAmount">0)
-      ORDER BY name,id LIMIT ${query.limit} OFFSET ${(query.page-1)*query.limit}
+      WHERE (${query.debtOnly !== 'true'} OR "outstandingAmount" > 0)
+      ORDER BY name, id LIMIT ${query.limit} OFFSET ${(query.page - 1) * query.limit}
     `);
     const total = Number(rows[0]?.total ?? 0);
-    return { data: rows.map(r => ({ id: r.id, name: r.name, phoneNumber: r.phoneNumber, address: r.address, archived: r.archived, outstandingAmount: Number(r.outstandingAmount), unknownCount: Number(r.unknownCount) })), meta: { page: query.page, limit: query.limit, total, totalPages: Math.max(1,Math.ceil(total/query.limit)) } };
+    return {
+      data: rows.map(r => ({
+        id: r.id,
+        name: r.name,
+        phoneNumber: r.phoneNumber,
+        address: r.address,
+        archived: r.archived,
+        totalPurchased: Number(r.totalPurchased),
+        totalPaid: Number(r.totalPaid),
+        outstandingAmount: Number(r.outstandingAmount),
+        advanceAmount: Number(r.advanceAmount),
+      })),
+      meta: { page: query.page, limit: query.limit, total, totalPages: Math.max(1, Math.ceil(total / query.limit)) },
+    };
   }
+
   async detail(id: string, query: CustomerQuery) {
     const customer = await this.prisma.customer.findUnique({ where: { id } });
     if (!customer) throw new NotFoundException('Khách hàng không tồn tại');
-    const where = { customerId: id, deleteAt: null };
-    const [ids, total] = await Promise.all([
-      this.prisma.exportInvoice.findMany({ where, select: { id: true }, orderBy: { createdAt: 'desc' }, take: query.limit, skip: (query.page-1)*query.limit }),
-      this.prisma.exportInvoice.count({ where }),
+
+    const [purchasesAgg, paymentsAgg] = await Promise.all([
+      this.prisma.$queryRaw<Array<{ total: Prisma.Decimal }>>(Prisma.sql`
+        SELECT COALESCE(SUM(ep.unit_price * ep.export_quantity), 0) AS total
+        FROM fish_erp.export_invoice ei
+        JOIN fish_erp.export_product ep ON ep.export_invoice_id = ei.id
+        WHERE ei.customer_id = ${id}::uuid AND ei."exportStatus" = 'COMPLETED' AND ei.delete_at IS NULL
+      `),
+      this.prisma.customerPayment.aggregate({
+        where: { customerId: id, reversedAt: null },
+        _sum: { amount: true },
+      }),
     ]);
-    const invoices = await Promise.all(ids.map(i => this.exports.findById(i.id)));
-    return { ...customer, invoices, meta: { page: query.page, total, totalPages: Math.max(1,Math.ceil(total/query.limit)) } };
+
+    const totalPurchased = Number(purchasesAgg[0]?.total ?? 0);
+    const totalPaid = Number(paymentsAgg._sum.amount ?? 0);
+    const outstandingAmount = Math.max(0, totalPurchased - totalPaid);
+    const advanceAmount = Math.max(0, totalPaid - totalPurchased);
+
+    const [exportList, payments] = await Promise.all([
+      this.exports.findMany({ customerId: id, page: query.page, limit: query.limit }),
+      this.prisma.customerPayment.findMany({
+        where: { customerId: id },
+        orderBy: { paidAt: 'desc' },
+      }),
+    ]);
+
+    return {
+      ...customer,
+      totalPurchased,
+      totalPaid,
+      outstandingAmount,
+      advanceAmount,
+      invoices: exportList.data,
+      payments: payments.map(p => ({
+        id: p.id,
+        amount: Number(p.amount),
+        note: p.note,
+        paidAt: p.paidAt,
+        invoiceId: p.invoiceId,
+        createdBy: p.createdBy,
+        reversedAt: p.reversedAt,
+        reversedBy: p.reversedBy,
+        reversalReason: p.reversalReason,
+      })),
+      meta: { page: query.page, total: exportList.meta.total, totalPages: exportList.meta.totalPages },
+    };
+  }
+
+  async addPayment(customerId: string, input: import('./customers.dto.js').CustomerPaymentInput, actorId: string) {
+    const amount = new Prisma.Decimal(input.amount);
+    if (amount.lte(0)) throw new BadRequestException('Số tiền thu phải lớn hơn 0');
+    if (input.paidAt && new Date(input.paidAt).getTime() > Date.now()) throw new BadRequestException('Ngày thu không được ở tương lai');
+
+    const customer = await this.prisma.customer.findUnique({ where: { id: customerId } });
+    if (!customer) throw new NotFoundException('Khách hàng không tồn tại');
+    if (customer.archived) throw new BadRequestException('Khách hàng đã ngừng sử dụng');
+
+    await this.prisma.$transaction(async tx => {
+      const existing = await tx.customerPayment.findFirst({
+        where: { customerId, idempotencyKey: input.idempotencyKey },
+      });
+      if (existing) {
+        if (!existing.amount.eq(amount)) throw new ConflictException('Mã giao dịch đã dùng cho khoản thu khác');
+        return;
+      }
+      await tx.customerPayment.create({
+        data: {
+          customerId,
+          amount,
+          idempotencyKey: input.idempotencyKey,
+          note: input.note?.trim() || null,
+          ...(input.paidAt ? { paidAt: new Date(input.paidAt) } : {}),
+          invoiceId: input.invoiceId || null,
+          createdBy: actorId,
+        },
+      });
+    });
+
+    return this.detail(customerId, { page: 1, limit: 10 });
+  }
+
+  async reversePayment(customerId: string, paymentId: string, input: import('./customers.dto.js').CustomerReversalInput, actorId: string) {
+    if (!input.reason.trim()) throw new BadRequestException('Cần lý do hoàn/đảo khoản thu');
+
+    await this.prisma.$transaction(async tx => {
+      const payment = await tx.customerPayment.findFirst({
+        where: { id: paymentId, customerId },
+      });
+      if (!payment) throw new NotFoundException('Khoản thu không tồn tại');
+      if (payment.reversedAt) return;
+
+      await tx.customerPayment.update({
+        where: { id: paymentId },
+        data: {
+          reversedAt: new Date(),
+          reversedBy: actorId,
+          reversalReason: input.reason.trim(),
+        },
+      });
+    });
+
+    return this.detail(customerId, { page: 1, limit: 10 });
   }
 }

@@ -239,15 +239,11 @@ model ExportInvoice {
   customerName    String? @map("customer_name") @db.VarChar(120) // Tên khách hàng
   customerId      String? @map("customer_id") @db.Uuid
   customer        Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  paymentTracked  Boolean @default(false) @map("payment_tracked")
-  plannedPaidAmount Decimal? @map("planned_paid_amount") @db.Decimal(18, 2)
-  reconciliationNote String? @map("reconciliation_note") @db.VarChar(500)
-  reconciledAt DateTime? @map("reconciled_at") @db.Timestamptz(3)
-  reconciledBy String? @map("reconciled_by") @db.Uuid
-  payments InvoicePayment[]
   customerPhone   String? @map("customer_phone") @db.VarChar(20) // Số điện thoại khách hàng
   deliveryAddress String? @map("delivery_address") @db.VarChar(500) // Địa chỉ giao hàng
   exportNote      String? @map("export_note") @db.VarChar(1000) // Ghi chú hóa đơn
+  paidAmount      Decimal? @default(0) @map("planned_paid_amount") @db.Decimal(18, 2)
+  payments        CustomerPayment[]
 
   // Thời điểm nghiệp vụ để lọc báo cáo; DB lưu timestamptz, ứng dụng hiển thị theo Asia/Ho_Chi_Minh
   completedAt DateTime? @map("completed_at") @db.Timestamptz(3)
@@ -364,27 +360,36 @@ model Customer {
   createdBy String? @map("created_by") @db.Uuid
   updatedBy String? @map("updated_by") @db.Uuid
   invoices ExportInvoice[]
+  payments CustomerPayment[]
+
   @@index([name])
   @@map("customer")
   @@schema("fish_erp")
 }
 
-model InvoicePayment {
+model CustomerPayment {
   id String @id @default(uuid()) @db.Uuid
-  invoiceId String @map("invoice_id") @db.Uuid
-  invoice ExportInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
-  amount Decimal @db.Decimal(18, 2)
-  idempotencyKey String @map("idempotency_key") @db.VarChar(100)
-  note String? @db.VarChar(500)
-  paidAt DateTime @default(now()) @map("paid_at") @db.Timestamptz(3)
-  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
-  createdBy String @map("created_by") @db.Uuid
-  reversedAt DateTime? @map("reversed_at") @db.Timestamptz(3)
-  reversedBy String? @map("reversed_by") @db.Uuid
-  reversalReason String? @map("reversal_reason") @db.VarChar(500)
-  @@unique([invoiceId, idempotencyKey])
-  @@index([invoiceId, paidAt])
-  @@map("invoice_payment")
+
+  customerId String   @map("customer_id") @db.Uuid
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  invoiceId String?        @map("invoice_id") @db.Uuid
+  invoice   ExportInvoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  amount         Decimal   @db.Decimal(18, 2)
+  idempotencyKey String    @map("idempotency_key") @db.VarChar(100)
+  note           String?   @db.VarChar(500)
+  paidAt         DateTime  @default(now()) @map("paid_at") @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy      String    @map("created_by") @db.Uuid
+  reversedAt     DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversedBy     String?   @map("reversed_by") @db.Uuid
+  reversalReason String?   @map("reversal_reason") @db.VarChar(500)
+
+  @@unique([customerId, idempotencyKey])
+  @@index([customerId, paidAt])
+  @@index([invoiceId])
+  @@map("customer_payment")
   @@schema("fish_erp")
 }
 
