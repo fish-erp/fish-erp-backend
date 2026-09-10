@@ -20,6 +20,11 @@ export class ListExportsQueryDto {
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
+  customerId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
   search?: string;
 
   @ApiPropertyOptional({ enum: ExportStatus })

@@ -59,6 +59,13 @@ export class CreateExportDto {
   @IsEnum(ExportType)
   exportType?: ExportType;
 
+  @ApiPropertyOptional({ description: 'Phí giao hàng (tiền ship)' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999999999999)
+  shippingFee?: number;
+
   @ApiPropertyOptional({ enum: ExportStatus, default: ExportStatus.COMPLETED })
   @IsOptional()
   @IsEnum(ExportStatus)
