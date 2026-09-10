@@ -12,6 +12,7 @@ import { ImportsModule } from './modules/imports/imports.module.js';
 import { ProductsModule } from './modules/products/products.module.js';
 import { ReportsModule } from './modules/reports/reports.module.js';
 import { UsersModule } from './modules/users/users.module.js';
+import { CustomersModule } from './modules/customers/customers.module.js';
 
 @Module({
   imports: [
@@ -35,6 +36,7 @@ import { UsersModule } from './modules/users/users.module.js';
     PrismaModule,
     AuthModule,
     UsersModule,
+    CustomersModule,
     ProductsModule,
     ImportsModule,
     ExportsModule,

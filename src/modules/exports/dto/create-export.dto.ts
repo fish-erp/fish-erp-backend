@@ -9,6 +9,8 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  IsNumber,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -34,6 +36,18 @@ export class CreateExportItemDto {
 }
 
 export class CreateExportDto {
+  @ApiPropertyOptional({ nullable: true })
+  @IsOptional()
+  @IsUUID()
+  customerId?: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Đã trả; null hoặc bỏ trống = trả đủ' })
+  @IsOptional()
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(999999999999)
+  paidAmount?: number | null;
+
   @ApiPropertyOptional({ example: 'INV-202609-0001', description: 'Tự sinh nếu để trống' })
   @IsOptional()
   @IsString()

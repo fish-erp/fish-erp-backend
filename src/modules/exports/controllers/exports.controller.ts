@@ -23,6 +23,8 @@ import type { ExportListResponseDto, ExportResponseDto } from '../dto/export-res
 import { ListExportsQueryDto } from '../dto/list-exports-query.dto.js';
 import { UpdateExportDto } from '../dto/update-export.dto.js';
 import { ExportsService } from '../services/exports.service.js';
+import { PaymentsService } from '../services/payments.service.js';
+import { PaymentInput, ReconcileInput, ReversalInput } from '../dto/payment.dto.js';
 
 @ApiTags('exports')
 @ApiBearerAuth('access-token')
@@ -30,7 +32,16 @@ import { ExportsService } from '../services/exports.service.js';
 @Roles(UserRole.ADMIN)
 @Controller('exports')
 export class ExportsController {
-  constructor(private readonly exportsService: ExportsService) {}
+  constructor(private readonly exportsService: ExportsService, private readonly payments: PaymentsService) {}
+
+  @Post(':id/payments')
+  addPayment(@Param('id') id: string, @Body() input: PaymentInput, @CurrentUser() actor: AuthenticatedUser) { return this.payments.add(id, input, actor.id); }
+
+  @Post(':id/payments/:paymentId/reverse')
+  reversePayment(@Param('id') id: string, @Param('paymentId') paymentId: string, @Body() input: ReversalInput, @CurrentUser() actor: AuthenticatedUser) { return this.payments.reverse(id, paymentId, input, actor.id); }
+
+  @Post(':id/reconcile')
+  reconcile(@Param('id') id: string, @Body() input: ReconcileInput, @CurrentUser() actor: AuthenticatedUser) { return this.payments.reconcile(id, input, actor.id); }
 
   @Post()
   @ApiOperation({ summary: 'Tạo phiếu xuất nhiều sản phẩm' })

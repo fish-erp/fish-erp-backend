@@ -15,6 +15,7 @@ import {
 import { DocumentSequenceService } from '../../../infrastructure/database/prisma/document-sequence.service.js';
 import { InventoryStockService } from '../../../infrastructure/database/prisma/inventory-stock.service.js';
 import { PrismaService } from '../../../infrastructure/database/prisma/prisma.service.js';
+import { initializePayment, lockInvoice } from './invoice-money.js';
 import type { CreateExportDto, CreateExportItemDto } from '../dto/create-export.dto.js';
 import type {
   ExportItemResponseDto,
@@ -25,7 +26,7 @@ import type { ListExportsQueryDto } from '../dto/list-exports-query.dto.js';
 import type { UpdateExportDto } from '../dto/update-export.dto.js';
 
 type ExportInvoiceRecord = Prisma.ExportInvoiceGetPayload<{
-  include: { exportProducts: { include: { product: true } } };
+  include: { exportProducts: { include: { product: true } }; payments: true };
 }>;
 
 @Injectable()
@@ -62,11 +63,13 @@ export class ExportsService {
       }
       const invoice = await tx.exportInvoice.create({
         data: {
+          ...(await this.customerSnapshot(tx, input.customerId)),
+          paymentTracked: true,
+          plannedPaidAmount: input.paidAmount ?? null,
           invoiceCode,
           exportType: input.exportType ?? ExportType.AT_HOME,
           exportStatus: status,
-          customerName: input.customerName?.trim() || null,
-          customerPhone: input.customerPhone?.trim() || null,
+          ...(input.customerId ? {} : { customerName: input.customerName?.trim() || null, customerPhone: input.customerPhone?.trim() || null }),
           deliveryAddress: input.deliveryAddress?.trim() || null,
           exportNote: input.exportNote?.trim() || null,
           completedAt: status === ExportStatus.COMPLETED ? now : null,
@@ -95,6 +98,7 @@ export class ExportsService {
         }),
       });
       if (status === ExportStatus.COMPLETED) {
+        await initializePayment(tx, invoice.id, actorId);
         await this.stockService.apply(tx, {
           adjustments: input.items.map((item) => ({
             productId: item.productId,
@@ -146,7 +150,7 @@ export class ExportsService {
         skip: (query.page - 1) * query.limit,
         take: query.limit,
         orderBy: { createdAt: 'desc' },
-        include: { exportProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } } },
+        include: { exportProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } }, payments: { orderBy: { paidAt: 'desc' } } },
       }),
       this.prisma.exportInvoice.count({ where }),
     ]);
@@ -164,7 +168,7 @@ export class ExportsService {
   async findById(id: string): Promise<ExportResponseDto> {
     const invoice = await this.prisma.exportInvoice.findFirst({
       where: { id, deleteAt: null },
-      include: { exportProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } } },
+      include: { exportProducts: { include: { product: true }, orderBy: { createdAt: 'asc' } }, payments: { orderBy: { paidAt: 'desc' } } },
     });
     if (!invoice) throw new NotFoundException('Phiếu xuất hàng không tồn tại');
     return this.toResponse(invoice);
@@ -177,6 +181,9 @@ export class ExportsService {
     }
     if (input.items) this.ensureDistinctProducts(input.items);
     await this.prisma.$transaction(async (tx) => {
+      await lockInvoice(tx, id);
+      const locked = await tx.exportInvoice.findUniqueOrThrow({ where: { id } });
+      if (locked.exportStatus !== ExportStatus.EDITING) throw new ConflictException('Phiếu đã được xử lý');
       if (input.items) {
         const count = await tx.product.count({
           where: { id: { in: input.items.map((item) => item.productId) }, deleteAt: null },
@@ -194,9 +201,11 @@ export class ExportsService {
         where: { id },
         data: {
           ...(input.invoiceCode !== undefined ? { invoiceCode: input.invoiceCode.trim() } : {}),
+          ...(input.customerId !== undefined ? await this.customerSnapshot(tx, input.customerId) : {}),
+          ...(input.paidAmount !== undefined ? { plannedPaidAmount: input.paidAmount } : {}),
           ...(input.exportType !== undefined ? { exportType: input.exportType } : {}),
-          ...(input.customerName !== undefined ? { customerName: input.customerName.trim() || null } : {}),
-          ...(input.customerPhone !== undefined ? { customerPhone: input.customerPhone.trim() || null } : {}),
+          ...(!input.customerId && !locked.customerId && input.customerName !== undefined ? { customerName: input.customerName.trim() || null } : {}),
+          ...(!input.customerId && !locked.customerId && input.customerPhone !== undefined ? { customerPhone: input.customerPhone.trim() || null } : {}),
           ...(input.deliveryAddress !== undefined ? { deliveryAddress: input.deliveryAddress.trim() || null } : {}),
           ...(input.exportNote !== undefined ? { exportNote: input.exportNote.trim() || null } : {}),
           updatedBy: actorId,
@@ -223,6 +232,7 @@ export class ExportsService {
 
   async complete(id: string, actorId: string): Promise<ExportResponseDto> {
     await this.prisma.$transaction(async (tx) => {
+      await lockInvoice(tx, id);
       const invoice = await tx.exportInvoice.findFirst({
         where: { id, deleteAt: null },
         include: { exportProducts: { include: { product: true } } },
@@ -265,12 +275,15 @@ export class ExportsService {
         occurredAt: now,
         actorId,
       });
+      await initializePayment(tx, id, actorId);
     });
     return this.findById(id);
   }
 
   async cancel(id: string, actorId: string): Promise<ExportResponseDto> {
     await this.prisma.$transaction(async (tx) => {
+      await lockInvoice(tx, id);
+      if (await tx.invoicePayment.count({ where: { invoiceId: id, reversedAt: null } })) throw new BadRequestException('Cần hoàn/đảo các khoản thu trước khi hủy phiếu');
       const invoice = await tx.exportInvoice.findFirst({
         where: { id, deleteAt: null },
         include: { exportProducts: true },
@@ -304,13 +317,16 @@ export class ExportsService {
   }
 
   async delete(id: string, actorId: string): Promise<void> {
-    const invoice = await this.getInvoice(id);
+    await this.prisma.$transaction(async tx => {
+    await lockInvoice(tx, id);
+    const invoice = await tx.exportInvoice.findUniqueOrThrow({ where: { id } });
     if (invoice.exportStatus === ExportStatus.COMPLETED) {
       throw new BadRequestException('Phiếu đã hoàn thành phải được hủy trước khi xóa');
     }
-    await this.prisma.exportInvoice.update({
+    await tx.exportInvoice.update({
       where: { id },
       data: { deleteAt: new Date(), deleteBy: actorId, updatedBy: actorId },
+    });
     });
   }
 
@@ -351,7 +367,19 @@ export class ExportsService {
         updatedAt: item.product.updatedAt,
       },
     }));
+    const total = invoice.exportProducts.reduce((sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice ?? item.product.productPrice).mul(item.exportQuantity)), new Prisma.Decimal(0));
+    const paid = (invoice.payments ?? []).filter(p => !p.reversedAt).reduce((sum, p) => sum.plus(p.amount), new Prisma.Decimal(0));
+    const tracked = invoice.paymentTracked && invoice.exportStatus === ExportStatus.COMPLETED;
+    const outstanding = tracked ? total.minus(paid).toNumber() : null;
     return {
+      customerId: invoice.customerId,
+      reconciliationNote: invoice.reconciliationNote,
+      paymentTracked: invoice.paymentTracked,
+      plannedPaidAmount: invoice.plannedPaidAmount?.toNumber() ?? null,
+      paidAmount: tracked ? paid.toNumber() : null,
+      outstandingAmount: outstanding,
+      paymentStatus: invoice.exportStatus === ExportStatus.CANCELLED ? 'CANCELLED' : invoice.exportStatus === ExportStatus.EDITING ? 'DRAFT' : !tracked ? 'UNKNOWN' : outstanding === 0 ? 'PAID' : paid.gt(0) ? 'PARTIAL' : 'UNPAID',
+      payments: (invoice.payments ?? []).map(p => ({ id: p.id, amount: p.amount.toNumber(), note: p.note, paidAt: p.paidAt, createdBy: p.createdBy, reversedAt: p.reversedAt, reversalReason: p.reversalReason })),
       id: invoice.id,
       invoiceCode: invoice.invoiceCode,
       exportType: invoice.exportType,
@@ -364,12 +392,16 @@ export class ExportsService {
       cancelledAt: invoice.cancelledAt,
       items,
       totalQuantity: items.reduce((sum, item) => sum + item.exportQuantity, 0),
-      totalAmount: items.reduce(
-        (sum, item) => sum + (item.unitPrice ?? item.product.productPrice) * item.exportQuantity,
-        0,
-      ),
+      totalAmount: total.toNumber(),
       createdAt: invoice.createdAt,
       updatedAt: invoice.updatedAt,
     };
+  }
+
+  private async customerSnapshot(tx: Prisma.TransactionClient, customerId?: string | null) {
+    if (!customerId) return { customerId: null, customerName: null, customerPhone: null };
+    const customer = await tx.customer.findFirst({ where: { id: customerId, archived: false } });
+    if (!customer) throw new BadRequestException('Khách hàng không tồn tại hoặc đã ngừng sử dụng');
+    return { customerId: customer.id, customerName: customer.name, customerPhone: customer.phoneNumber };
   }
 }

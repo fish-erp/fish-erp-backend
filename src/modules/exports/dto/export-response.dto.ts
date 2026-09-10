@@ -18,6 +18,14 @@ export class ExportItemResponseDto {
 }
 
 export class ExportResponseDto {
+  reconciliationNote!: string | null;
+  customerId!: string | null;
+  paymentTracked!: boolean;
+  plannedPaidAmount!: number | null;
+  paidAmount!: number | null;
+  outstandingAmount!: number | null;
+  paymentStatus!: string;
+  payments!: Array<{ id: string; amount: number; note: string | null; paidAt: Date; createdBy: string; reversedAt: Date | null; reversalReason: string | null }>;
   @ApiProperty()
   id!: string;
   @ApiProperty()

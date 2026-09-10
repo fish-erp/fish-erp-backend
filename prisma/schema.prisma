@@ -237,6 +237,14 @@ model ExportInvoice {
   exportStatus ExportStatus @default(EDITING) // Trạng thái chung của hóa đơn
 
   customerName    String? @map("customer_name") @db.VarChar(120) // Tên khách hàng
+  customerId      String? @map("customer_id") @db.Uuid
+  customer        Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  paymentTracked  Boolean @default(false) @map("payment_tracked")
+  plannedPaidAmount Decimal? @map("planned_paid_amount") @db.Decimal(18, 2)
+  reconciliationNote String? @map("reconciliation_note") @db.VarChar(500)
+  reconciledAt DateTime? @map("reconciled_at") @db.Timestamptz(3)
+  reconciledBy String? @map("reconciled_by") @db.Uuid
+  payments InvoicePayment[]
   customerPhone   String? @map("customer_phone") @db.VarChar(20) // Số điện thoại khách hàng
   deliveryAddress String? @map("delivery_address") @db.VarChar(500) // Địa chỉ giao hàng
   exportNote      String? @map("export_note") @db.VarChar(1000) // Ghi chú hóa đơn
@@ -256,6 +264,7 @@ model ExportInvoice {
   updatedBy String?  @map("updated_by") @db.Uuid
 
   @@index([exportStatus, completedAt])
+  @@index([customerId, exportStatus])
   @@index([createdAt])
   @@map("export_invoice")
   @@schema("fish_erp")
@@ -344,6 +353,41 @@ model InventoryMovement {
 }
 
 // Bộ đếm sinh mã phiếu theo tháng, tránh trùng mã khi nhiều request chạy đồng thời
+model Customer {
+  id String @id @default(uuid()) @db.Uuid
+  name String @db.VarChar(120)
+  phoneNumber String @unique @map("phone_number") @db.VarChar(20)
+  address String? @db.VarChar(500)
+  archived Boolean @default(false)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+  createdBy String? @map("created_by") @db.Uuid
+  updatedBy String? @map("updated_by") @db.Uuid
+  invoices ExportInvoice[]
+  @@index([name])
+  @@map("customer")
+  @@schema("fish_erp")
+}
+
+model InvoicePayment {
+  id String @id @default(uuid()) @db.Uuid
+  invoiceId String @map("invoice_id") @db.Uuid
+  invoice ExportInvoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  amount Decimal @db.Decimal(18, 2)
+  idempotencyKey String @map("idempotency_key") @db.VarChar(100)
+  note String? @db.VarChar(500)
+  paidAt DateTime @default(now()) @map("paid_at") @db.Timestamptz(3)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  createdBy String @map("created_by") @db.Uuid
+  reversedAt DateTime? @map("reversed_at") @db.Timestamptz(3)
+  reversedBy String? @map("reversed_by") @db.Uuid
+  reversalReason String? @map("reversal_reason") @db.VarChar(500)
+  @@unique([invoiceId, idempotencyKey])
+  @@index([invoiceId, paidAt])
+  @@map("invoice_payment")
+  @@schema("fish_erp")
+}
+
 model DocumentSequence {
   key       String   @id @db.VarChar(30)
   value     Int      @default(0)
