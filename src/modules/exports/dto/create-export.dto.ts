@@ -28,6 +28,27 @@ export class CreateExportItemDto {
   @Min(1)
   exportQuantity!: number;
 
+  @ApiPropertyOptional({ description: 'Giá gốc niêm yết' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  originalPrice?: number;
+
+  @ApiPropertyOptional({ description: 'Mức giảm giá trên 1 đơn vị SP' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  discount?: number;
+
+  @ApiPropertyOptional({ description: 'Giá muốn bán thực tế' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  unitPrice?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
