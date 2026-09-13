@@ -12,6 +12,10 @@ export class ExportItemResponseDto {
   @ApiPropertyOptional({ nullable: true })
   unitPrice!: number | null;
   @ApiPropertyOptional({ nullable: true })
+  originalPrice!: number | null;
+  @ApiPropertyOptional({ nullable: true })
+  discount!: number;
+  @ApiPropertyOptional({ nullable: true })
   lineNote!: string | null;
   @ApiProperty({ type: ProductResponseDto })
   product!: ProductResponseDto;

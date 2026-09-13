@@ -9,8 +9,11 @@ import type { CustomerInput, CustomerQuery, CustomerUpdate } from './customers.d
 export class CustomersService {
   constructor(private readonly prisma: PrismaService, private readonly exports: ExportsService) {}
   private fields(input: CustomerInput) {
-    const phoneNumber = normalizeVietnamPhoneNumber(input.phoneNumber);
-    if (!phoneNumber) throw new BadRequestException('Số điện thoại Việt Nam không hợp lệ');
+    let phoneNumber: string | null = null;
+    if (input.phoneNumber && input.phoneNumber.trim()) {
+      phoneNumber = normalizeVietnamPhoneNumber(input.phoneNumber);
+      if (!phoneNumber) throw new BadRequestException('Số điện thoại Việt Nam không hợp lệ');
+    }
     if (!input.name.trim()) throw new BadRequestException('Vui lòng nhập tên khách hàng');
     return { name: input.name.trim(), phoneNumber, address: input.address?.trim() || null };
   }
@@ -24,7 +27,11 @@ export class CustomersService {
   async update(id: string, input: CustomerUpdate, actor: string) {
     const current = await this.prisma.customer.findUnique({ where: { id } });
     if (!current) throw new NotFoundException('Khách hàng không tồn tại');
-    const fields = this.fields({ name: input.name ?? current.name, phoneNumber: input.phoneNumber ?? current.phoneNumber, address: input.address ?? current.address ?? '' });
+    const fields = this.fields({
+      name: input.name ?? current.name,
+      phoneNumber: input.phoneNumber !== undefined ? (input.phoneNumber || undefined) : (current.phoneNumber ?? undefined),
+      address: input.address !== undefined ? (input.address ?? undefined) : (current.address ?? undefined),
+    });
     try { return await this.prisma.customer.update({ where: { id }, data: { ...fields, ...(input.archived !== undefined ? { archived: input.archived } : {}), updatedBy: actor } }); }
     catch (error) {
       if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('SĐT đã được sử dụng');
@@ -33,7 +40,7 @@ export class CustomersService {
   }
   async list(query: CustomerQuery) {
     const search = query.search?.trim();
-    const rows = await this.prisma.$queryRaw<Array<{ id: string; name: string; phoneNumber: string; address: string | null; archived: boolean; totalPurchased: Prisma.Decimal; totalPaid: Prisma.Decimal; outstandingAmount: Prisma.Decimal; advanceAmount: Prisma.Decimal; total: bigint }>>(Prisma.sql`
+    const rows = await this.prisma.$queryRaw<Array<{ id: string; name: string; phoneNumber: string | null; address: string | null; archived: boolean; totalPurchased: Prisma.Decimal; totalPaid: Prisma.Decimal; outstandingAmount: Prisma.Decimal; advanceAmount: Prisma.Decimal; total: bigint }>>(Prisma.sql`
       WITH summary AS (
         SELECT c.id, c.name, c.phone_number AS "phoneNumber", c.address, c.archived,
           COALESCE(purchases.amount, 0) AS "totalPurchased",
@@ -57,7 +64,7 @@ export class CustomersService {
           WHERE cp.customer_id = c.id AND cp.reversed_at IS NULL
         ) payments ON true
         WHERE (${query.archived === 'all'} OR c.archived = ${query.archived === 'true'})
-          AND (${!search} OR c.name ILIKE ${'%' + (search ?? '') + '%'} OR c.phone_number ILIKE ${'%' + (search ?? '') + '%'})
+          AND (${!search} OR c.name ILIKE ${'%' + (search ?? '') + '%'} OR (c.phone_number IS NOT NULL AND c.phone_number ILIKE ${'%' + (search ?? '') + '%'}))
         GROUP BY c.id, purchases.amount, payments.amount
       )
       SELECT *, COUNT(*) OVER() AS total FROM summary

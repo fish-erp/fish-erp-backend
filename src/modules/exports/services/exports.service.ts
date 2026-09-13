@@ -87,11 +87,21 @@ export class ExportsService {
         data: input.items.map((item) => {
           const product = productMap.get(item.productId)!;
           const completed = status === ExportStatus.COMPLETED;
+          const origPrice = item.originalPrice !== undefined ? new Prisma.Decimal(item.originalPrice) : product.productPrice;
+          let calculatedUnitPrice: Prisma.Decimal;
+          if (item.unitPrice !== undefined) {
+            calculatedUnitPrice = new Prisma.Decimal(item.unitPrice);
+          } else if (item.discount !== undefined && item.discount > 0) {
+            calculatedUnitPrice = Prisma.Decimal.max(0, origPrice.minus(item.discount));
+          } else {
+            calculatedUnitPrice = origPrice;
+          }
           return {
             exportInvoiceId: invoice.id,
             productId: item.productId,
             exportQuantity: item.exportQuantity,
-            unitPrice: completed ? product.productPrice : null,
+            originalPrice: origPrice,
+            unitPrice: calculatedUnitPrice,
             lineNote: item.lineNote?.trim() || null,
             productCodeSnapshot: completed ? product.productCode : null,
             productNameSnapshot: completed ? product.productName : null,
@@ -104,11 +114,20 @@ export class ExportsService {
       if (status === ExportStatus.COMPLETED) {
         await initializePayment(tx, invoice.id, actorId);
         await this.stockService.apply(tx, {
-          adjustments: input.items.map((item) => ({
-            productId: item.productId,
-            quantityDelta: -item.exportQuantity,
-            unitPrice: Number(productMap.get(item.productId)!.productPrice),
-          })),
+          adjustments: input.items.map((item) => {
+            const product = productMap.get(item.productId)!;
+            const origPrice = item.originalPrice !== undefined ? new Prisma.Decimal(item.originalPrice) : product.productPrice;
+            const price = item.unitPrice !== undefined
+              ? item.unitPrice
+              : item.discount !== undefined && item.discount > 0
+              ? Math.max(0, Number(origPrice) - item.discount)
+              : Number(origPrice);
+            return {
+              productId: item.productId,
+              quantityDelta: -item.exportQuantity,
+              unitPrice: price,
+            };
+          }),
           movementType: InventoryMovementType.EXPORT_COMPLETED,
           documentType: InventoryDocumentType.EXPORT,
           documentId: invoice.id,
@@ -228,16 +247,34 @@ export class ExportsService {
         },
       });
       if (input.items) {
+        const updateProducts = await tx.product.findMany({
+          where: { id: { in: input.items.map((item) => item.productId) }, deleteAt: null },
+        });
+        const updateProductMap = new Map(updateProducts.map((p) => [p.id, p]));
         await tx.exportProduct.deleteMany({ where: { exportInvoiceId: id } });
         await tx.exportProduct.createMany({
-          data: input.items.map((item) => ({
-            exportInvoiceId: id,
-            productId: item.productId,
-            exportQuantity: item.exportQuantity,
-            lineNote: item.lineNote?.trim() || null,
-            createdBy: actorId,
-            updatedBy: actorId,
-          })),
+          data: input.items.map((item) => {
+            const product = updateProductMap.get(item.productId)!;
+            const origPrice = item.originalPrice !== undefined ? new Prisma.Decimal(item.originalPrice) : product.productPrice;
+            let calculatedUnitPrice: Prisma.Decimal;
+            if (item.unitPrice !== undefined) {
+              calculatedUnitPrice = new Prisma.Decimal(item.unitPrice);
+            } else if (item.discount !== undefined && item.discount > 0) {
+              calculatedUnitPrice = Prisma.Decimal.max(0, origPrice.minus(item.discount));
+            } else {
+              calculatedUnitPrice = origPrice;
+            }
+            return {
+              exportInvoiceId: id,
+              productId: item.productId,
+              exportQuantity: item.exportQuantity,
+              originalPrice: origPrice,
+              unitPrice: calculatedUnitPrice,
+              lineNote: item.lineNote?.trim() || null,
+              createdBy: actorId,
+              updatedBy: actorId,
+            };
+          }),
         });
       }
     });
@@ -269,7 +306,8 @@ export class ExportsService {
       if (changed.count !== 1) throw new ConflictException('Phiếu xuất đã được xử lý');
       await tx.$executeRaw(Prisma.sql`
         UPDATE fish_erp.export_product AS item
-        SET unit_price = product.product_price,
+        SET original_price = COALESCE(item.original_price, product.product_price),
+            unit_price = COALESCE(item.unit_price, product.product_price),
             product_code_snapshot = product.product_code,
             product_name_snapshot = product.product_name,
             product_unit_snapshot = product.product_unit,
@@ -282,7 +320,7 @@ export class ExportsService {
         adjustments: invoice.exportProducts.map((item) => ({
           productId: item.productId,
           quantityDelta: -item.exportQuantity,
-          unitPrice: Number(item.product.productPrice),
+          unitPrice: Number(item.unitPrice ?? item.product.productPrice),
         })),
         movementType: InventoryMovementType.EXPORT_COMPLETED,
         documentType: InventoryDocumentType.EXPORT,
@@ -412,26 +450,37 @@ export class ExportsService {
     invoice: ExportInvoiceRecord,
     fifoMap?: Map<string, { allocatedPaid: number; outstanding: number }>,
   ): ExportResponseDto {
-    const items: ExportItemResponseDto[] = invoice.exportProducts.map((item) => ({
-      id: item.id,
-      productId: item.productId,
-      exportQuantity: item.exportQuantity,
-      unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
-      lineNote: item.lineNote,
-      product: {
-        id: item.product.id,
-        productCode: item.productCodeSnapshot ?? item.product.productCode,
-        productName: item.productNameSnapshot ?? item.product.productName,
-        productPrice: Number(item.product.productPrice),
-        remainingQuantity: item.product.remainingQuantity,
-        productUnit: item.productUnitSnapshot ?? item.product.productUnit,
-        productNote: item.product.productNote,
-        type: item.product.type,
-        status: item.product.status,
-        createdAt: item.product.createdAt,
-        updatedAt: item.product.updatedAt,
-      },
-    }));
+    const items: ExportItemResponseDto[] = invoice.exportProducts.map((item) => {
+      const origPrice = item.originalPrice !== null && item.originalPrice !== undefined
+        ? Number(item.originalPrice)
+        : Number(item.product.productPrice);
+      const uPrice = item.unitPrice !== null && item.unitPrice !== undefined
+        ? Number(item.unitPrice)
+        : origPrice;
+      const discount = Math.max(0, origPrice - uPrice);
+      return {
+        id: item.id,
+        productId: item.productId,
+        exportQuantity: item.exportQuantity,
+        unitPrice: item.unitPrice ? Number(item.unitPrice) : null,
+        originalPrice: item.originalPrice ? Number(item.originalPrice) : origPrice,
+        discount,
+        lineNote: item.lineNote,
+        product: {
+          id: item.product.id,
+          productCode: item.productCodeSnapshot ?? item.product.productCode,
+          productName: item.productNameSnapshot ?? item.product.productName,
+          productPrice: Number(item.product.productPrice),
+          remainingQuantity: item.product.remainingQuantity,
+          productUnit: item.productUnitSnapshot ?? item.product.productUnit,
+          productNote: item.product.productNote,
+          type: item.product.type,
+          status: item.product.status,
+          createdAt: item.product.createdAt,
+          updatedAt: item.product.updatedAt,
+        },
+      };
+    });
     const shippingFee = invoice.shippingFee ? Number(invoice.shippingFee) : 0;
     const total = invoice.exportProducts.reduce(
       (sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice ?? item.product.productPrice).mul(item.exportQuantity)),
