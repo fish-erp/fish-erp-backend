@@ -275,6 +275,7 @@ model ExportProduct {
 
   // Chụp lại Product.productPrice khi hóa đơn hoàn thành; phiếu EDITING có thể để null
   unitPrice Decimal? @map("unit_price") @db.Decimal(18, 2)
+  originalPrice Decimal? @map("original_price") @db.Decimal(18, 2) // Giá gốc niêm yết của sản phẩm tại thời điểm bán
   lineNote  String?  @map("line_note") @db.VarChar(500) // Ghi chú riêng cho dòng sản phẩm
 
   // Snapshot thông tin sản phẩm khi hóa đơn hoàn thành
@@ -353,7 +354,7 @@ model InventoryMovement {
 model Customer {
   id String @id @default(uuid()) @db.Uuid
   name String @db.VarChar(120)
-  phoneNumber String @unique @map("phone_number") @db.VarChar(20)
+  phoneNumber String? @unique @map("phone_number") @db.VarChar(20)
   address String? @db.VarChar(500)
   archived Boolean @default(false)
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
